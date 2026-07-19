@@ -1,0 +1,320 @@
+// 与后端 schemas 对齐的 TypeScript 类型
+
+// ── 简历 ──
+
+export interface ResumeBasics {
+  name: string;
+  phone: string;
+  email: string;
+  location: string;
+  title: string;
+  summary: string;
+  photo: string;
+}
+
+export interface ResumeEducation {
+  school: string;
+  major: string;
+  degree: string;
+  start: string;
+  end: string;
+  gpa: string;
+  description: string;
+}
+
+export interface ResumeExperience {
+  company: string;
+  position: string;
+  start: string;
+  end: string;
+  description: string;
+}
+
+export interface ResumeProject {
+  name: string;
+  role: string;
+  start: string;
+  end: string;
+  description: string;
+  tech_stack: string[];
+}
+
+export interface ResumeSkill {
+  category: string;
+  items: string[];
+}
+
+export interface ResumeData {
+  basics: ResumeBasics;
+  education: ResumeEducation[];
+  experiences: ResumeExperience[];
+  projects: ResumeProject[];
+  skills: ResumeSkill[];
+  template: string;
+}
+
+export interface Resume {
+  id: string;
+  name: string;
+  data: ResumeData;
+  raw_text: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ResumeListItem {
+  id: string;
+  name: string;
+  template: string;
+  created_at: string;
+  updated_at: string;
+  basics_name: string;
+  basics_title: string;
+}
+
+export interface ResumeTemplate {
+  name: string;
+  description: string;
+  accent: string;
+}
+
+// ── 职位库 ──
+
+export interface Position {
+  id: string;
+  name: string;
+  company_name: string;
+  company_business_scope: string;
+  job_title: string;
+  job_requirements: string;
+  notes: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PositionListItem {
+  id: string;
+  name: string;
+  company_name: string;
+  job_title: string;
+  job_requirements: string;
+  created_at: string;
+  updated_at: string;
+}
+
+// ── 面试分析 ──
+
+export interface MatchAnalysis {
+  match_score: number;
+  strong_points: string[];
+  weak_points: string[];
+  not_mentioned: string[];
+  improvement_points: string[];
+}
+
+export interface BusinessScenario {
+  scenario: string;
+  inferred_problem: string;
+  interview_angle: string;
+}
+
+export interface Risk {
+  risk_type: string;
+  description: string;
+  severity: string;
+  suggested_question: string;
+}
+
+export interface Question {
+  direction: string;
+  title: string;
+  question: string;
+  focus: string;
+  difficulty: string;
+  rationale: string;
+  reference_answer: string;
+  reference_hint: string;
+  follow_ups: string[];
+}
+
+export interface InterviewRound {
+  round_index: number;
+  round_name: string;
+  round_focus: string;
+  questions: Question[];
+}
+
+export interface InterviewQuestions {
+  rounds: InterviewRound[];
+  resume_deep_dive: Question[];
+  business_scenario: Question[];
+  technical_professional: Question[];
+  behavioral_cultural: Question[];
+  pressure_adaptability: Question[];
+}
+
+export interface InterviewResult {
+  company_name: string;
+  job_title: string;
+  match_analysis: MatchAnalysis;
+  business_scenarios: BusinessScenario[];
+  risks: Risk[];
+  questions: InterviewQuestions;
+  preparation_tips: string[];
+}
+
+export interface AnalysisResponse {
+  success: boolean;
+  result: InterviewResult | null;
+  session_id: string;
+  error?: string;
+}
+
+// ── 模拟面试 ──
+
+export interface InterviewTurn {
+  turn_index: number;
+  question: string;
+  answer: string;
+  evaluation: string;
+  score: number;
+  improvements: string[];
+  evaluated: boolean;
+}
+
+export interface InterviewState {
+  interview_id: string;
+  status: string;
+  current_question: string | null;
+  current_focus: string | null;
+  current_rationale: string | null;
+  current_reference_answer: string | null;
+  turn_index: number;
+  max_turns: number;
+  turns: InterviewTurn[];
+  finished: boolean;
+  company_name: string;
+  job_title: string;
+}
+
+export interface InterviewReport {
+  interview_id: string;
+  session_id: string;
+  company_name: string;
+  job_title: string;
+  overall_score: number;
+  rounds_completed: number;
+  turns: InterviewTurn[];
+  strengths: string[];
+  weak_areas: string[];
+  learning_suggestions: string[];
+  summary: string;
+  created_at: string;
+}
+
+export interface InterviewListItem {
+  id: string;
+  session_id: string;
+  status: string;
+  company_name: string;
+  job_title: string;
+  turns: number;
+  created_at: string;
+  overall_score: number;
+  rounds_completed: number;
+  summary: string;
+}
+
+// ── 历史记录 ──
+
+export interface AnalysisHistoryItem {
+  session_id: string;
+  title: string;
+  company_name: string;
+  job_title: string;
+  match_score: number;
+  rounds_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AnalysisHistoryDetail {
+  success: boolean;
+  session_id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  result: InterviewResult;
+}
+
+export interface InterviewReportDetail {
+  success: boolean;
+  interview_id: string;
+  status: string;
+  company_name: string;
+  job_title: string;
+  turns: InterviewTurn[];
+  report: InterviewReport | null;
+}
+
+// ── 其他 ──
+
+export interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+  ts?: number;
+}
+
+export interface ChatResponse {
+  answer: string;
+  session_id: string;
+  result?: InterviewResult | null;
+  error?: string;
+}
+
+export interface ModelInfo {
+  provider: string;
+  model: string;
+  api_key_configured: boolean;
+  base_url: string;
+}
+
+export interface ModelConfigRequest {
+  provider?: string;
+  model?: string;
+  api_key?: string;
+  base_url?: string;
+}
+
+export interface ModelTestRequest {
+  model: string;
+  api_key: string;
+  base_url: string;
+}
+
+export interface ModelTestResponse {
+  success: boolean;
+  latency_ms: number;
+  reply: string;
+  error: string;
+}
+
+export interface SessionSummary {
+  id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  message_count: number;
+  metadata: Record<string, unknown>;
+}
+
+export interface ExportResponse {
+  success: boolean;
+  filename?: string;
+  error?: string;
+}
+
+export interface ReportFile {
+  name: string;
+  size: number;
+}
