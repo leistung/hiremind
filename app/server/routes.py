@@ -76,7 +76,7 @@ BAILIAN_TEXT_MODELS = [
 
 # ── 健康检查 ──
 
-@router.get("/health", response_model=HealthResponse)
+@router.get("/health", response_model=HealthResponse, tags=["Health"])
 async def health():
     return HealthResponse(
         status="ok",
@@ -87,7 +87,7 @@ async def health():
 
 # ── 模型配置 ──
 
-@router.get("/models/info", response_model=ModelInfo)
+@router.get("/models/info", response_model=ModelInfo, tags=["Models"])
 async def get_model_info():
     return ModelInfo(
         provider=settings.default_provider,
@@ -97,12 +97,12 @@ async def get_model_info():
     )
 
 
-@router.get("/models/bailian")
+@router.get("/models/bailian", tags=["Models"])
 async def get_bailian_models():
     return {"models": BAILIAN_TEXT_MODELS}
 
 
-@router.post("/models/config")
+@router.post("/models/config", tags=["Models"])
 async def update_model_config(req: ModelConfigRequest):
     settings.apply_update(
         provider=req.provider,
@@ -114,7 +114,7 @@ async def update_model_config(req: ModelConfigRequest):
     return {"success": True, "model": settings.model_name}
 
 
-@router.post("/models/test", response_model=ModelTestResponse)
+@router.post("/models/test", response_model=ModelTestResponse, tags=["Models"])
 def test_model_connection(req: ModelTestRequest):
     """测试模型连接是否可用.
 
@@ -154,7 +154,7 @@ def test_model_connection(req: ModelTestRequest):
 
 # ── 文档解析 ──
 
-@router.post("/documents/parse")
+@router.post("/documents/parse", tags=["Documents"])
 async def parse_document_api(file: UploadFile = File(...)):
     """上传 PDF / Word 文件，返回解析后的文本."""
     suffix = Path(file.filename or "").suffix
@@ -172,7 +172,7 @@ async def parse_document_api(file: UploadFile = File(...)):
 
 # ── 表单分析 ──
 
-@router.post("/analysis/run", response_model=AnalysisResponse)
+@router.post("/analysis/run", response_model=AnalysisResponse, tags=["Analysis"])
 def run_analysis(req: AnalysisRequest):
     """直接执行完整分析.
 
@@ -210,7 +210,7 @@ def run_analysis(req: AnalysisRequest):
 
 # ── 历史记录 ──
 
-@router.get("/analysis/history", response_model=AnalysisHistoryResponse)
+@router.get("/analysis/history", response_model=AnalysisHistoryResponse, tags=["Analysis"])
 async def list_analysis_history():
     """列出所有生成过分析报告的会话摘要.
 
@@ -248,7 +248,7 @@ async def list_analysis_history():
     return AnalysisHistoryResponse(items=items)
 
 
-@router.get("/analysis/history/{session_id}")
+@router.get("/analysis/history/{session_id}", tags=["Analysis"])
 async def get_analysis_history_detail(session_id: str):
     """读取指定会话的完整分析报告."""
     from hiremind import SessionStore
@@ -270,7 +270,7 @@ async def get_analysis_history_detail(session_id: str):
     }
 
 
-@router.get("/interview/{interview_id}/report")
+@router.get("/interview/{interview_id}/report", tags=["Interview"])
 def get_interview_report(interview_id: str):
     """读取指定模拟面试的最终报告(含完整 turns)."""
     store = get_interview_store()
@@ -298,7 +298,7 @@ def get_interview_report(interview_id: str):
 
 # ── 对话(保留旧 Agent 对话能力)──
 
-@router.post("/chat", response_model=ChatResponse)
+@router.post("/chat", response_model=ChatResponse, tags=["Chat"])
 def chat(req: ChatRequest):
     try:
         agent = get_agent()
@@ -323,7 +323,7 @@ def chat(req: ChatRequest):
         return ChatResponse(answer="", session_id="", error=str(exc))
 
 
-@router.post("/chat/new-session")
+@router.post("/chat/new-session", tags=["Chat"])
 async def new_session():
     agent = get_agent()
     agent.reset()
@@ -332,7 +332,7 @@ async def new_session():
 
 # ── 会话管理 ──
 
-@router.get("/sessions", response_model=SessionListResponse)
+@router.get("/sessions", response_model=SessionListResponse, tags=["Sessions"])
 async def list_sessions():
     from hiremind import SessionStore
     ws = get_workspace()
@@ -341,7 +341,7 @@ async def list_sessions():
     return SessionListResponse(sessions=[SessionSummary(**s) for s in sessions])
 
 
-@router.get("/sessions/{session_id}", response_model=SessionDetailResponse)
+@router.get("/sessions/{session_id}", response_model=SessionDetailResponse, tags=["Sessions"])
 async def get_session(session_id: str):
     from hiremind import SessionStore
     ws = get_workspace()
@@ -352,7 +352,7 @@ async def get_session(session_id: str):
     return SessionDetailResponse(session=session)
 
 
-@router.delete("/sessions/{session_id}")
+@router.delete("/sessions/{session_id}", tags=["Sessions"])
 async def delete_session(session_id: str):
     from hiremind import SessionStore
     ws = get_workspace()
@@ -365,7 +365,7 @@ async def delete_session(session_id: str):
 
 # ── 追加出题 ──
 
-@router.post("/questions/generate")
+@router.post("/questions/generate", tags=["Questions"])
 def generate_more_questions(req: GenerateQuestionsRequest):
     try:
         agent = get_agent()
@@ -381,7 +381,7 @@ def generate_more_questions(req: GenerateQuestionsRequest):
 
 # ── 报告导出(分析报告)──
 
-@router.post("/export", response_model=ExportResponse)
+@router.post("/export", response_model=ExportResponse, tags=["Export"])
 def export_report(req: ExportRequest):
     try:
         agent = get_agent()
@@ -408,7 +408,7 @@ def export_report(req: ExportRequest):
         return ExportResponse(success=False, error=str(exc))
 
 
-@router.get("/export/download/{filename}")
+@router.get("/export/download/{filename}", tags=["Export"])
 async def download_report(filename: str):
     ws = get_workspace()
     data = ws.get_report(filename)
@@ -423,7 +423,7 @@ async def download_report(filename: str):
     return FileResponse(str(tmp), filename=filename, media_type=media_type)
 
 
-@router.get("/export/list")
+@router.get("/export/list", tags=["Export"])
 async def list_reports():
     ws = get_workspace()
     reports = ws.list_reports()
@@ -432,12 +432,12 @@ async def list_reports():
 
 # ── 简历管理 ──
 
-@router.get("/resumes/templates")
+@router.get("/resumes/templates", tags=["Resumes"])
 async def list_resume_templates():
     return {"templates": TEMPLATES}
 
 
-@router.get("/resumes", response_model=ResumeListResponse)
+@router.get("/resumes", response_model=ResumeListResponse, tags=["Resumes"])
 async def list_resumes():
     store = get_resume_store()
     resumes = store.list_all()
@@ -457,7 +457,7 @@ async def list_resumes():
     )
 
 
-@router.post("/resumes")
+@router.post("/resumes", tags=["Resumes"])
 async def create_resume(req: ResumeCreateRequest):
     store = get_resume_store()
     resume = store.create(name=req.name)
@@ -471,7 +471,7 @@ async def create_resume(req: ResumeCreateRequest):
     return {"success": True, "resume": resume.model_dump()}
 
 
-@router.get("/resumes/{resume_id}")
+@router.get("/resumes/{resume_id}", tags=["Resumes"])
 async def get_resume(resume_id: str):
     store = get_resume_store()
     resume = store.get(resume_id)
@@ -480,7 +480,7 @@ async def get_resume(resume_id: str):
     return {"success": True, "resume": resume.model_dump()}
 
 
-@router.put("/resumes/{resume_id}")
+@router.put("/resumes/{resume_id}", tags=["Resumes"])
 async def update_resume(resume_id: str, req: ResumeCreateRequest):
     store = get_resume_store()
     resume = store.get(resume_id)
@@ -498,7 +498,7 @@ async def update_resume(resume_id: str, req: ResumeCreateRequest):
     return {"success": True, "resume": resume.model_dump()}
 
 
-@router.delete("/resumes/{resume_id}")
+@router.delete("/resumes/{resume_id}", tags=["Resumes"])
 async def delete_resume(resume_id: str):
     store = get_resume_store()
     deleted = store.delete(resume_id)
@@ -507,7 +507,7 @@ async def delete_resume(resume_id: str):
     return {"success": True}
 
 
-@router.post("/resumes/parse-text")
+@router.post("/resumes/parse-text", tags=["Resumes"])
 def parse_resume_text(req: ResumeParseRequest):
     """把文本解析为结构化简历."""
     try:
@@ -517,7 +517,7 @@ def parse_resume_text(req: ResumeParseRequest):
         return {"success": False, "error": str(exc)}
 
 
-@router.post("/resumes/upload-parse")
+@router.post("/resumes/upload-parse", tags=["Resumes"])
 async def upload_and_parse_resume(file: UploadFile = File(...)):
     """上传文件并解析为结构化简历(文本提取 + LLM 结构化).
 
@@ -545,7 +545,7 @@ async def upload_and_parse_resume(file: UploadFile = File(...)):
         Path(tmp_path).unlink(missing_ok=True)
 
 
-@router.post("/resumes/{resume_id}/export")
+@router.post("/resumes/{resume_id}/export", tags=["Resumes"])
 def export_resume(resume_id: str, req: ResumeExportRequest):
     """导出简历为 Word/PDF."""
     store = get_resume_store()
@@ -585,7 +585,7 @@ IMAGE_MEDIA_TYPES = {
 }
 
 
-@router.post("/resumes/{resume_id}/photo")
+@router.post("/resumes/{resume_id}/photo", tags=["Resumes"])
 async def upload_resume_photo(resume_id: str, file: UploadFile = File(...)):
     """上传简历头像/职业照,返回可访问的 URL。
 
@@ -624,7 +624,7 @@ async def upload_resume_photo(resume_id: str, file: UploadFile = File(...)):
     return {"success": True, "photo": photo_url}
 
 
-@router.get("/assets/{filename}")
+@router.get("/assets/{filename}", tags=["Assets"])
 async def serve_asset(filename: str):
     """提供上传资源文件(图片)的访问."""
     # 防止路径穿越
@@ -642,7 +642,7 @@ async def serve_asset(filename: str):
 
 # ── 职位库管理 ──
 
-@router.get("/positions", response_model=PositionListResponse)
+@router.get("/positions", response_model=PositionListResponse, tags=["Positions"])
 async def list_positions():
     """列出所有保存的职位."""
     store = get_position_store()
@@ -650,7 +650,7 @@ async def list_positions():
     return {"positions": [p.model_dump() for p in items]}
 
 
-@router.post("/positions")
+@router.post("/positions", tags=["Positions"])
 async def create_position(req: PositionCreateRequest):
     """新建职位."""
     store = get_position_store()
@@ -665,7 +665,7 @@ async def create_position(req: PositionCreateRequest):
     return {"success": True, "position": position.model_dump()}
 
 
-@router.get("/positions/{position_id}")
+@router.get("/positions/{position_id}", tags=["Positions"])
 async def get_position(position_id: str):
     """获取单个职位."""
     store = get_position_store()
@@ -675,7 +675,7 @@ async def get_position(position_id: str):
     return {"success": True, "position": position.model_dump()}
 
 
-@router.put("/positions/{position_id}")
+@router.put("/positions/{position_id}", tags=["Positions"])
 async def update_position(position_id: str, req: PositionCreateRequest):
     """更新职位."""
     store = get_position_store()
@@ -692,7 +692,7 @@ async def update_position(position_id: str, req: PositionCreateRequest):
     return {"success": True, "position": position.model_dump()}
 
 
-@router.delete("/positions/{position_id}")
+@router.delete("/positions/{position_id}", tags=["Positions"])
 async def delete_position(position_id: str):
     """删除职位."""
     store = get_position_store()
@@ -724,7 +724,7 @@ def _serialize_interview_state(iv: MockInterview) -> dict:
     }
 
 
-@router.post("/interview/start")
+@router.post("/interview/start", tags=["Interview"])
 def start_interview(req: InterviewStartRequest):
     """启动一场模拟面试,基于指定 session 的分析结果."""
     try:
@@ -761,7 +761,7 @@ def start_interview(req: InterviewStartRequest):
         return {"success": False, "error": str(exc)}
 
 
-@router.post("/interview/{interview_id}/answer")
+@router.post("/interview/{interview_id}/answer", tags=["Interview"])
 def submit_answer(interview_id: str, req: InterviewAnswerRequest):
     """提交候选人回答,返回即时评价."""
     store = get_interview_store()
@@ -781,7 +781,7 @@ def submit_answer(interview_id: str, req: InterviewAnswerRequest):
         return {"success": False, "error": str(exc)}
 
 
-@router.post("/interview/{interview_id}/next")
+@router.post("/interview/{interview_id}/next", tags=["Interview"])
 def next_question(interview_id: str):
     """生成下一道题(或结束面试)."""
     store = get_interview_store()
@@ -811,7 +811,7 @@ def next_question(interview_id: str):
         return {"success": False, "error": str(exc)}
 
 
-@router.post("/interview/{interview_id}/finish")
+@router.post("/interview/{interview_id}/finish", tags=["Interview"])
 def finish_interview(interview_id: str):
     """主动结束面试,生成最终报告."""
     store = get_interview_store()
@@ -831,7 +831,7 @@ def finish_interview(interview_id: str):
         return {"success": False, "error": str(exc)}
 
 
-@router.get("/interview/{interview_id}/state")
+@router.get("/interview/{interview_id}/state", tags=["Interview"])
 async def get_interview_state(interview_id: str):
     store = get_interview_store()
     agent = get_agent()
@@ -841,14 +841,14 @@ async def get_interview_state(interview_id: str):
     return {"success": True, "state": _serialize_interview_state(iv)}
 
 
-@router.get("/interview", response_model=InterviewListResponse)
+@router.get("/interview", response_model=InterviewListResponse, tags=["Interview"])
 async def list_interviews():
     store = get_interview_store()
     items = store.list_all()
     return InterviewListResponse(interviews=items)
 
 
-@router.delete("/interview/{interview_id}")
+@router.delete("/interview/{interview_id}", tags=["Interview"])
 async def delete_interview(interview_id: str):
     store = get_interview_store()
     deleted = store.delete(interview_id)
