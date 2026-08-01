@@ -1,0 +1,25 @@
+# Python 缓存与虚拟环境
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 运行时数据(由 compose 卷挂载,不入镜像)
+.hiremind/
+
+# 环境变量与密钥
+.env
+.env.*
+
+# 前端构建产物与依赖(后端镜像不需要)
+app/studio/node_modules/
+app/studio/.next/
+
+# IDE / 系统
+.idea/
+.vscode/
+.DS_Store
+
+# 文档(不进镜像)
+*.md
