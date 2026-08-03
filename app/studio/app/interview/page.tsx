@@ -9,6 +9,11 @@ import ModelBadge from "@/components/ModelBadge";
 import type {
   InterviewReport,
   InterviewState,
+  StageConfig,
+  StageSummary,
+  StageProgressItem,
+  WrittenQuestionItem,
+  InterviewStageReport,
 } from "@/lib/types";
 
 type Phase = "idle" | "asking" | "answering" | "evaluating" | "next" | "finished";
@@ -34,6 +39,8 @@ interface PersistedInterviewState {
   interviewModel: string;
   state: InterviewState | null;
   report: InterviewReport | null;
+  stageConfigs: StageConfig[];
+  writtenAnswers: Record<number, string>;
   savedAt: number;
 }
 
@@ -41,12 +48,24 @@ const INTERVIEW_STATE_KEY = "hiremind:interview-state-v1";
 // 启动中意图:整页刷新后用 listInterviews 恢复
 const INTERVIEW_STARTING_KEY = "hiremind:interview-starting-v1";
 
+// 默认阶段配置(全部启用)
+const DEFAULT_STAGE_CONFIGS: StageConfig[] = [
+  { stage_type: "written", stage_name: "笔试", enabled: true, question_count: 15 },
+  { stage_type: "tech_1", stage_name: "技术一面", enabled: true, question_count: 2 },
+  { stage_type: "tech_2", stage_name: "技术二面", enabled: true, question_count: 2 },
+  { stage_type: "hr", stage_name: "人事面", enabled: true, question_count: 2 },
+];
+
+// 笔试就绪标记:后端 first_question 返回该值时表示进入笔试阶段(无单题)
+const WRITTEN_READY = "__WRITTEN_READY__";
+
 // 模块级 in-flight 启动请求:软导航(切换页面再回来)不会重置模块级变量,
 // 同一个 promise 可被多次 await,从而跨组件卸载/重载保持启动状态
 interface InflightStart {
   analysisId: string;
   maxTurns: number;
   interviewModel: string;
+  stageConfigs: StageConfig[];
   promise: Promise<{
     success: boolean;
     state?: InterviewState;
@@ -88,6 +107,16 @@ function InterviewPage() {
   const [showStopConfirm, setShowStopConfirm] = useState(false);
   // 分析记录 ID(提升到父级,启动中也能在输入框显示)
   const [analysisId, setAnalysisId] = useState(presetAnalysisId);
+  // 多阶段:用户配置的阶段
+  const [stageConfigs, setStageConfigs] = useState<StageConfig[]>(DEFAULT_STAGE_CONFIGS);
+  // 笔试答案(题目序号→回答)
+  const [writtenAnswers, setWrittenAnswers] = useState<Record<number, string>>({});
+  // 阶段完成总结(用于弹层)
+  const [stageSummary, setStageSummary] = useState<StageSummary | null>(null);
+  // 是否显示阶段总结弹层
+  const [showStageSummary, setShowStageSummary] = useState(false);
+  // 正在进入下一阶段
+  const [advancing, setAdvancing] = useState(false);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const answerRef = useRef<HTMLTextAreaElement>(null);
@@ -110,6 +139,7 @@ function InterviewPage() {
       setAnalysisId(inflight.analysisId);
       setMaxTurns(inflight.maxTurns);
       setInterviewModel(inflight.interviewModel);
+      setStageConfigs(inflight.stageConfigs);
       setRestored(true);
       (async () => {
         try {
@@ -117,12 +147,21 @@ function InterviewPage() {
           if (!mountedRef.current) return; // 再次离开页面,保留 inflight 供下次恢复
           if (r.success && r.state) {
             setState(r.state);
-            setChat([
-              { kind: "system", content: `面试开始 · ${r.state.company_name} · ${r.state.job_title} · 共 ${r.state.max_turns} 轮`, ts: Date.now() },
-              { kind: "question", content: r.state.current_question || "", focus: r.state.current_focus || undefined, rationale: r.state.current_rationale || undefined, referenceAnswer: r.state.current_reference_answer || undefined, ts: Date.now() },
-            ]);
-            setPhase("answering");
-            setTimeout(() => answerRef.current?.focus(), 100);
+            const firstQ = r.first_question || r.state.current_question || "";
+            // 笔试就绪:不添加 question 消息,phase 设为 answering 显示笔试视图
+            if (firstQ === WRITTEN_READY || r.state.current_stage_type === "written") {
+              setChat([
+                { kind: "system", content: `面试开始 · ${r.state.company_name} · ${r.state.job_title}`, ts: Date.now() },
+              ]);
+              setPhase("answering");
+            } else {
+              setChat([
+                { kind: "system", content: `面试开始 · ${r.state.company_name} · ${r.state.job_title} · 共 ${r.state.max_turns} 轮`, ts: Date.now() },
+                { kind: "question", content: firstQ, focus: r.state.current_focus || undefined, rationale: r.state.current_rationale || undefined, referenceAnswer: r.state.current_reference_answer || undefined, ts: Date.now() },
+              ]);
+              setPhase("answering");
+              setTimeout(() => answerRef.current?.focus(), 100);
+            }
           } else {
             setError(r.error || "启动失败,请先在分析页生成报告");
             setPhase("idle");
@@ -154,6 +193,7 @@ function InterviewPage() {
           setAnalysisId(s.analysisId);
           setMaxTurns(s.maxTurns || 2);
           setInterviewModel(s.interviewModel || "");
+          if (s.stageConfigs) setStageConfigs(s.stageConfigs);
           setRestored(true);
           (async () => {
             try {
@@ -168,13 +208,20 @@ function InterviewPage() {
                 if (!mountedRef.current) return;
                 if (sr.success && sr.state) {
                   setState(sr.state);
-                  setChat([
-                    { kind: "system", content: `面试开始 · ${sr.state.company_name} · ${sr.state.job_title} · 共 ${sr.state.max_turns} 轮`, ts: Date.now() },
-                    { kind: "question", content: sr.state.current_question || "", focus: sr.state.current_focus || undefined, rationale: sr.state.current_rationale || undefined, referenceAnswer: sr.state.current_reference_answer || undefined, ts: Date.now() },
-                  ]);
+                  // 笔试就绪:不添加 question 消息,显示笔试视图
+                  if (sr.state.current_stage_type === "written") {
+                    setChat([
+                      { kind: "system", content: `面试开始 · ${sr.state.company_name} · ${sr.state.job_title}`, ts: Date.now() },
+                    ]);
+                  } else {
+                    setChat([
+                      { kind: "system", content: `面试开始 · ${sr.state.company_name} · ${sr.state.job_title} · 共 ${sr.state.max_turns} 轮`, ts: Date.now() },
+                      { kind: "question", content: sr.state.current_question || "", focus: sr.state.current_focus || undefined, rationale: sr.state.current_rationale || undefined, referenceAnswer: sr.state.current_reference_answer || undefined, ts: Date.now() },
+                    ]);
+                    setTimeout(() => answerRef.current?.focus(), 100);
+                  }
                   setPhase("answering");
                   setRestoring(false);
-                  setTimeout(() => answerRef.current?.focus(), 100);
                   return;
                 }
               }
@@ -201,6 +248,8 @@ function InterviewPage() {
           setRestoring(true);
           setMaxTurns(ps.maxTurns || 2);
           setInterviewModel(ps.interviewModel || "");
+          if (ps.stageConfigs) setStageConfigs(ps.stageConfigs);
+          if (ps.writtenAnswers) setWrittenAnswers(ps.writtenAnswers);
           setChat(ps.chat || []);
           setReport(ps.report || null);
           setPhase(ps.phase);
@@ -258,6 +307,8 @@ function InterviewPage() {
       interviewModel,
       state,
       report,
+      stageConfigs,
+      writtenAnswers,
       savedAt: Date.now(),
     };
     try {
@@ -265,7 +316,7 @@ function InterviewPage() {
       // 调试:确认写入
       console.log("[interview] persisted to sessionStorage:", ps.interviewId, ps.phase);
     } catch {}
-  }, [restored, phase, chat, maxTurns, interviewModel, state, report]);
+  }, [restored, phase, chat, maxTurns, interviewModel, state, report, stageConfigs, writtenAnswers]);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -279,6 +330,9 @@ function InterviewPage() {
     setError("");
     setChat([]);
     setReport(null);
+    setWrittenAnswers({});
+    setShowStageSummary(false);
+    setStageSummary(null);
     try {
       // 启动面试前拉取当前模型,用于本次面试期间冻结显示
       let model = "";
@@ -287,12 +341,20 @@ function InterviewPage() {
         model = info.model || "";
         setInterviewModel(model);
       } catch {}
+      // 构造后端 stages:仅启用阶段,笔试用自身题数,对话阶段用每阶段题数
+      const stages: StageConfig[] = stageConfigs
+        .filter((s) => s.enabled)
+        .map((s) => ({
+          ...s,
+          question_count: s.stage_type === "written" ? s.question_count : maxTurns,
+        }));
       // 创建 promise 并存到模块级,使切换页面再回来时能 await 同一个 promise
-      const promise = api.startInterview(idToStart, maxTurns);
+      const promise = api.startInterview(idToStart, maxTurns, stages);
       inflightStart = {
         analysisId: idToStart,
         maxTurns,
         interviewModel: model,
+        stageConfigs,
         promise,
         startedAt: Date.now(),
       };
@@ -302,6 +364,7 @@ function InterviewPage() {
           analysisId: idToStart,
           maxTurns,
           interviewModel: model,
+          stageConfigs,
           savedAt: Date.now(),
         }));
       } catch {}
@@ -314,23 +377,36 @@ function InterviewPage() {
         return;
       }
       setState(r.state);
-      setChat([
-        {
-          kind: "system",
-          content: `面试开始 · ${r.state.company_name} · ${r.state.job_title} · 共 ${r.state.max_turns} 轮`,
-          ts: Date.now(),
-        },
-        {
-          kind: "question",
-          content: r.state.current_question || "",
-          focus: r.state.current_focus || undefined,
-          rationale: r.state.current_rationale || undefined,
-          referenceAnswer: r.state.current_reference_answer || undefined,
-          ts: Date.now(),
-        },
-      ]);
-      setPhase("answering");
-      setTimeout(() => answerRef.current?.focus(), 100);
+      const firstQ = r.first_question || r.state.current_question || "";
+      // 笔试就绪:不添加 question 消息,phase 设为 answering 显示笔试视图
+      if (firstQ === WRITTEN_READY || r.state.current_stage_type === "written") {
+        setChat([
+          {
+            kind: "system",
+            content: `面试开始 · ${r.state.company_name} · ${r.state.job_title}`,
+            ts: Date.now(),
+          },
+        ]);
+        setPhase("answering");
+      } else {
+        setChat([
+          {
+            kind: "system",
+            content: `面试开始 · ${r.state.company_name} · ${r.state.job_title} · 共 ${r.state.max_turns} 轮`,
+            ts: Date.now(),
+          },
+          {
+            kind: "question",
+            content: firstQ,
+            focus: r.state.current_focus || undefined,
+            rationale: r.state.current_rationale || undefined,
+            referenceAnswer: r.state.current_reference_answer || undefined,
+            ts: Date.now(),
+          },
+        ]);
+        setPhase("answering");
+        setTimeout(() => answerRef.current?.focus(), 100);
+      }
     } catch {
       // 组件已卸载:保留 inflight(已 reject)供恢复时感知错误
       if (!mountedRef.current) return;
@@ -409,6 +485,12 @@ function InterviewPage() {
           },
         ]);
         setPhase("finished");
+      } else if (r.stage_completed) {
+        // 当前阶段完成:显示阶段总结弹层,不继续出题
+        setState(r.state || state);
+        setStageSummary(r.stage_summary || null);
+        setShowStageSummary(true);
+        setPhase("next");
       } else {
         // 下一题
         setState(r.state || state);
@@ -429,6 +511,94 @@ function InterviewPage() {
     } catch {
       setError("网络错误");
       setPhase("next");
+    }
+  }
+
+  // 笔试批量提交
+  async function submitWrittenAnswers() {
+    if (!state || phase !== "answering") return;
+    const questions = state.written_questions || [];
+    if (questions.length === 0) return;
+    setPhase("evaluating");
+    setError("");
+    // 构造 answers:key 是字符串序号("0", "1", ...)
+    const answers: Record<string, string> = {};
+    questions.forEach((q, i) => {
+      answers[String(i)] = (writtenAnswers[i] || "").trim();
+    });
+    try {
+      const r = await api.submitWrittenAnswers(state.interview_id, answers);
+      if (!r.success) {
+        setError(r.error || "提交失败");
+        setPhase("answering");
+        return;
+      }
+      setState(r.state || state);
+      // 显示阶段总结弹层
+      setStageSummary({
+        stage_type: state.current_stage_type || null,
+        stage_name: state.current_stage_name || "笔试",
+        stage_score: r.stage_score || 0,
+        stage_summary: r.stage_summary || "",
+        promotion_hint: r.promotion_hint || "",
+      });
+      setShowStageSummary(true);
+      setPhase("next");
+    } catch {
+      setError("网络错误");
+      setPhase("answering");
+    }
+  }
+
+  // 进入下一阶段(多阶段模式)
+  async function advanceToNextStage() {
+    if (!state || advancing) return;
+    setAdvancing(true);
+    setError("");
+    try {
+      const r = await api.advanceStage(state.interview_id);
+      if (!r.success) {
+        setError(r.error || "进入下一阶段失败");
+        setAdvancing(false);
+        return;
+      }
+      setState(r.state || state);
+      setShowStageSummary(false);
+      setStageSummary(null);
+      if (r.finished) {
+        // 全部阶段结束,显示最终报告
+        setReport(r.report || null);
+        setChat((c) => [
+          ...c,
+          { kind: "system", content: "面试结束,正在生成最终报告…", ts: Date.now() },
+        ]);
+        setPhase("finished");
+      } else if (r.written_ready) {
+        // 下一阶段是笔试:清空笔试答案,显示笔试视图
+        setWrittenAnswers({});
+        setPhase("answering");
+      } else if (r.next_question) {
+        // 下一阶段是对话:添加阶段分隔条系统消息
+        const stageName = r.state?.current_stage_name || "新阶段";
+        setChat((c) => [
+          ...c,
+          { kind: "system", content: `—— ${stageName} 开始 ——`, ts: Date.now() },
+          {
+            kind: "question",
+            content: r.next_question || "",
+            focus: r.state?.current_focus || undefined,
+            rationale: r.state?.current_rationale || undefined,
+            referenceAnswer: r.state?.current_reference_answer || undefined,
+            ts: Date.now(),
+          },
+        ]);
+        setPhase("answering");
+        setTimeout(() => answerRef.current?.focus(), 100);
+      }
+    } catch {
+      setError("网络错误");
+    } finally {
+      setAdvancing(false);
     }
   }
 
@@ -479,6 +649,10 @@ function InterviewPage() {
     setPhase("idle");
     setInterviewModel("");
     setStarting(false);
+    setWrittenAnswers({});
+    setShowStageSummary(false);
+    setStageSummary(null);
+    setAdvancing(false);
     inflightStart = null;
     try {
       sessionStorage.removeItem(INTERVIEW_STATE_KEY);
@@ -492,6 +666,8 @@ function InterviewPage() {
   }
 
   const started = state !== null;
+  // 当前是否处于笔试阶段(显示笔试作答视图,替代对话流)
+  const isWrittenStage = !!state && state.current_stage_type === "written" && phase !== "finished";
 
   return (
     <div className="h-screen flex flex-col">
@@ -512,6 +688,8 @@ function InterviewPage() {
             starting={starting}
             maxTurns={maxTurns}
             setMaxTurns={setMaxTurns}
+            stageConfigs={stageConfigs}
+            setStageConfigs={setStageConfigs}
             onStart={startWithAnalysis}
             error={error}
           />
@@ -520,40 +698,79 @@ function InterviewPage() {
             {/* 顶部信息条 */}
             {state && (
               <div
-                className="px-6 py-3 border-b flex items-center justify-between shrink-0"
+                className="px-6 py-3 border-b shrink-0"
                 style={{ background: "var(--bg-elevated)", borderColor: "var(--border)" }}
               >
-                <div className="flex items-center gap-3">
-                  <div className="text-[14px] font-semibold text-stone-800">
-                    {state.company_name} · {state.job_title}
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="text-[14px] font-semibold text-stone-800">
+                      {state.company_name} · {state.job_title}
+                    </div>
+                    <span className="badge badge-muted">
+                      {state.turn_index} / {state.max_turns} 轮
+                    </span>
+                    {phase === "finished" && (
+                      <span className="badge badge-success">已完成</span>
+                    )}
+                    {interviewModel && <ModelBadge variant="inline" model={interviewModel} />}
                   </div>
-                  <span className="badge badge-muted">
-                    {state.turn_index} / {state.max_turns} 轮
-                  </span>
-                  {phase === "finished" && (
-                    <span className="badge badge-success">已完成</span>
-                  )}
-                  {interviewModel && <ModelBadge variant="inline" model={interviewModel} />}
+                  <div className="flex items-center gap-2">
+                    <Link href="/history" className="btn btn-ghost text-[12px]">
+                      历史记录
+                    </Link>
+                    {phase !== "finished" && (
+                      <button onClick={finishNow} className="btn btn-ghost text-[12px]">
+                        提前结束
+                      </button>
+                    )}
+                    {phase !== "finished" && (
+                      <button
+                        onClick={requestStop}
+                        className="btn btn-ghost text-[12px]"
+                        style={{ color: "var(--danger)" }}
+                      >
+                        停止
+                      </button>
+                    )}
+                  </div>
                 </div>
-                <div className="flex items-center gap-2">
-                  <Link href="/history" className="btn btn-ghost text-[12px]">
-                    历史记录
-                  </Link>
-                  {phase !== "finished" && (
-                    <button onClick={finishNow} className="btn btn-ghost text-[12px]">
-                      提前结束
-                    </button>
-                  )}
-                  {phase !== "finished" && (
-                    <button
-                      onClick={requestStop}
-                      className="btn btn-ghost text-[12px]"
-                      style={{ color: "var(--danger)" }}
-                    >
-                      停止
-                    </button>
-                  )}
-                </div>
+                {/* 多阶段进度条 */}
+                {state.is_multi_stage && state.stages_progress && state.stages_progress.length > 0 && (
+                  <div className="flex items-center gap-1.5 mt-2 flex-wrap">
+                    {state.stages_progress.map((s, i) => {
+                      const done = s.status === "completed";
+                      const current = s.status === "in_progress";
+                      return (
+                        <div key={i} className="flex items-center gap-1.5">
+                          {i > 0 && <span className="text-[11px] text-stone-300">→</span>}
+                          <span
+                            className="px-2 py-0.5 rounded-full text-[11px] flex items-center gap-1"
+                            style={{
+                              background: done
+                                ? "var(--success-soft, #dcfce7)"
+                                : current
+                                ? "var(--accent-bg)"
+                                : "var(--bg-muted)",
+                              color: done
+                                ? "var(--success)"
+                                : current
+                                ? "var(--accent)"
+                                : "var(--fg-muted)",
+                              fontWeight: current ? 600 : 400,
+                              border: current ? "1px solid var(--accent)" : "1px solid transparent",
+                            }}
+                          >
+                            <span>{done ? "✓" : current ? "●" : "○"}</span>
+                            <span>{s.stage_name}</span>
+                            {done && s.stage_score > 0 && (
+                              <span style={{ opacity: 0.8 }}>{s.stage_score}分</span>
+                            )}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             )}
 
@@ -591,82 +808,106 @@ function InterviewPage() {
               </div>
             )}
 
-            {/* 对话流 */}
-            <div ref={scrollRef} className="flex-1 overflow-y-auto px-6 py-6">
-              <div className="max-w-[760px] mx-auto space-y-4">
-                {chat.map((item, i) => (
-                  <ChatBubble key={i} item={item} />
-                ))}
-                {phase === "evaluating" && (
-                  <TypingBubble text="AI 正在评估你的回答…" />
-                )}
-                {phase === "asking" && (
-                  <TypingBubble text="AI 正在准备下一题…" />
-                )}
-              </div>
-            </div>
+            {/* 笔试视图 or 对话流 */}
+            {isWrittenStage ? (
+              <WrittenTestView
+                questions={state?.written_questions || []}
+                answers={writtenAnswers}
+                onAnswerChange={(idx, val) =>
+                  setWrittenAnswers((prev) => ({ ...prev, [idx]: val }))
+                }
+                onSubmit={submitWrittenAnswers}
+                submitting={phase === "evaluating"}
+              />
+            ) : (
+              <>
+                {/* 对话流 */}
+                <div ref={scrollRef} className="flex-1 overflow-y-auto px-6 py-6">
+                  <div className="max-w-[760px] mx-auto space-y-4">
+                    {chat.map((item, i) => (
+                      <ChatBubble key={i} item={item} />
+                    ))}
+                    {phase === "evaluating" && (
+                      <TypingBubble text="AI 正在评估你的回答…" />
+                    )}
+                    {phase === "asking" && (
+                      <TypingBubble text="AI 正在准备下一题…" />
+                    )}
+                  </div>
+                </div>
 
-            {/* 底部操作区 */}
-            {state && phase === "answering" && (
-              <div
-                className="px-6 py-4 border-t shrink-0"
-                style={{ background: "var(--bg-elevated)", borderColor: "var(--border)" }}
-              >
-                <div className="max-w-[760px] mx-auto">
-                  <textarea
-                    ref={answerRef}
-                    value={answer}
-                    onChange={(e) => setAnswer(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-                        e.preventDefault();
-                        submitAnswer();
-                      }
-                    }}
-                    rows={3}
-                    className="input"
-                    placeholder="在这里输入你的回答…  (⌘+Enter 提交)"
-                    disabled={phase !== "answering"}
-                  />
-                  <div className="flex items-center justify-between mt-2">
-                    <div className="text-[11px] text-stone-400">
-                      建议结合参考答案组织语言,但不要照搬
+                {/* 底部操作区 */}
+                {state && phase === "answering" && (
+                  <div
+                    className="px-6 py-4 border-t shrink-0"
+                    style={{ background: "var(--bg-elevated)", borderColor: "var(--border)" }}
+                  >
+                    <div className="max-w-[760px] mx-auto">
+                      <textarea
+                        ref={answerRef}
+                        value={answer}
+                        onChange={(e) => setAnswer(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                            e.preventDefault();
+                            submitAnswer();
+                          }
+                        }}
+                        rows={3}
+                        className="input"
+                        placeholder="在这里输入你的回答…  (⌘+Enter 提交)"
+                        disabled={phase !== "answering"}
+                      />
+                      <div className="flex items-center justify-between mt-2">
+                        <div className="text-[11px] text-stone-400">
+                          建议结合参考答案组织语言,但不要照搬
+                        </div>
+                        <button
+                          onClick={submitAnswer}
+                          disabled={!answer.trim() || phase !== "answering"}
+                          className="btn btn-primary"
+                        >
+                          提交回答
+                        </button>
+                      </div>
                     </div>
-                    <button
-                      onClick={submitAnswer}
-                      disabled={!answer.trim() || phase !== "answering"}
-                      className="btn btn-primary"
-                    >
-                      提交回答
-                    </button>
                   </div>
-                </div>
-              </div>
-            )}
+                )}
 
-            {state && phase === "next" && (
-              <div
-                className="px-6 py-4 border-t shrink-0"
-                style={{ background: "var(--bg-elevated)", borderColor: "var(--border)" }}
-              >
-                <div className="max-w-[760px] mx-auto flex items-center justify-between">
-                  <div className="text-[12px] text-stone-500">
-                    评价已生成,继续下一题?
+                {state && phase === "next" && !showStageSummary && (
+                  <div
+                    className="px-6 py-4 border-t shrink-0"
+                    style={{ background: "var(--bg-elevated)", borderColor: "var(--border)" }}
+                  >
+                    <div className="max-w-[760px] mx-auto flex items-center justify-between">
+                      <div className="text-[12px] text-stone-500">
+                        评价已生成,继续下一题?
+                      </div>
+                      <div className="flex gap-2">
+                        <button onClick={finishNow} className="btn btn-ghost">
+                          结束面试
+                        </button>
+                        <button onClick={nextQuestion} className="btn btn-primary">
+                          下一题 →
+                        </button>
+                      </div>
+                    </div>
                   </div>
-                  <div className="flex gap-2">
-                    <button onClick={finishNow} className="btn btn-ghost">
-                      结束面试
-                    </button>
-                    <button onClick={nextQuestion} className="btn btn-primary">
-                      下一题 →
-                    </button>
-                  </div>
-                </div>
-              </div>
+                )}
+              </>
             )}
 
             {phase === "finished" && report && (
               <FinalReportView report={report} />
+            )}
+
+            {/* 阶段总结弹层 */}
+            {showStageSummary && stageSummary && (
+              <StageSummaryModal
+                summary={stageSummary}
+                advancing={advancing}
+                onAdvance={advanceToNextStage}
+              />
             )}
           </>
         )}
@@ -682,6 +923,8 @@ function StartView({
   starting,
   maxTurns,
   setMaxTurns,
+  stageConfigs,
+  setStageConfigs,
   onStart,
   error,
 }: {
@@ -690,9 +933,31 @@ function StartView({
   starting: boolean;
   maxTurns: number;
   setMaxTurns: (n: number) => void;
+  stageConfigs: StageConfig[];
+  setStageConfigs: (s: StageConfig[]) => void;
   onStart: (analysisId: string) => void;
   error: string;
 }) {
+  // 切换某阶段启用状态
+  function toggleStage(stageType: string) {
+    setStageConfigs(
+      stageConfigs.map((s) =>
+        s.stage_type === stageType ? { ...s, enabled: !s.enabled } : s,
+      ),
+    );
+  }
+  // 修改笔试题数
+  function setWrittenCount(n: number) {
+    const clamped = Math.min(20, Math.max(5, n));
+    setStageConfigs(
+      stageConfigs.map((s) =>
+        s.stage_type === "written" ? { ...s, question_count: clamped } : s,
+      ),
+    );
+  }
+  const writtenEnabled = stageConfigs.find((s) => s.stage_type === "written")?.enabled ?? false;
+  const writtenCount = stageConfigs.find((s) => s.stage_type === "written")?.question_count ?? 15;
+
   return (
     <div className="flex-1 flex items-center justify-center p-8">
       <div className="max-w-[480px] w-full">
@@ -712,7 +977,7 @@ function StartView({
             AI 模拟面试
           </h1>
           <p className="text-[13px] text-stone-500 leading-relaxed">
-            基于面试分析报告,AI 将自适应提问,逐题给出评价,最终生成面试结果与学习建议
+            基于面试分析报告,支持笔试 → 技术一面 → 技术二面 → 人事面 多阶段流程,AI 自适应出题与评价
           </p>
         </div>
 
@@ -732,8 +997,62 @@ function StartView({
               页生成报告后,可点击「去模拟面试」直接进入
             </div>
           </div>
+
+          {/* 面试阶段配置 */}
           <div>
-            <label className="label">面试轮数</label>
+            <label className="label">面试阶段</label>
+            <div className="grid grid-cols-2 gap-2">
+              {stageConfigs.map((s) => (
+                <label
+                  key={s.stage_type}
+                  className="flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer"
+                  style={{
+                    background: s.enabled ? "var(--accent-bg)" : "var(--bg-muted)",
+                    border: `1px solid ${s.enabled ? "var(--accent)" : "var(--border)"}`,
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={s.enabled}
+                    onChange={() => toggleStage(s.stage_type)}
+                    disabled={starting}
+                    className="accent-orange-600"
+                  />
+                  <span
+                    className="text-[12px]"
+                    style={{ color: s.enabled ? "var(--accent)" : "var(--fg-muted)", fontWeight: s.enabled ? 600 : 400 }}
+                  >
+                    {s.stage_name}
+                  </span>
+                </label>
+              ))}
+            </div>
+            {writtenEnabled && (
+              <div className="mt-2 px-3 py-2 rounded-lg" style={{ background: "var(--bg-muted)" }}>
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-[11px] text-stone-500">笔试题数</span>
+                  <span className="text-[12px] font-semibold text-orange-700">{writtenCount} 题</span>
+                </div>
+                <input
+                  type="range"
+                  min={5}
+                  max={20}
+                  value={writtenCount}
+                  onChange={(e) => setWrittenCount(parseInt(e.target.value, 10))}
+                  disabled={starting}
+                  className="w-full accent-orange-600"
+                  style={{ height: 4 }}
+                />
+                <div className="flex justify-between text-[10px] text-stone-400 mt-0.5">
+                  <span>5</span>
+                  <span>20</span>
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div>
+            <label className="label">每阶段题数(对话阶段)</label>
             <div className="flex items-center gap-2">
               {[2, 3, 4].map((n) => (
                 <button
@@ -762,9 +1081,9 @@ function StartView({
                 }}
                 className="input flex-1 text-center"
                 style={{ width: 60, padding: "8px 6px", fontSize: 13 }}
-                title="自定义面试轮数(1-9)"
+                title="自定义每阶段题数(1-9)"
               />
-              <span className="text-[11px] text-stone-400 shrink-0">轮</span>
+              <span className="text-[11px] text-stone-400 shrink-0">题</span>
             </div>
           </div>
           {error && (
@@ -777,7 +1096,7 @@ function StartView({
           )}
           <button
             onClick={() => onStart(analysisId)}
-            disabled={!analysisId.trim() || starting}
+            disabled={!analysisId.trim() || starting || !stageConfigs.some((s) => s.enabled)}
             className="btn btn-primary w-full"
             style={{ padding: "10px 16px", fontSize: 14 }}
           >
@@ -945,6 +1264,153 @@ function TypingBubble({ text }: { text: string }) {
   );
 }
 
+// ── 笔试作答视图 ──
+function WrittenTestView({
+  questions,
+  answers,
+  onAnswerChange,
+  onSubmit,
+  submitting,
+}: {
+  questions: WrittenQuestionItem[];
+  answers: Record<number, string>;
+  onAnswerChange: (index: number, value: string) => void;
+  onSubmit: () => void;
+  submitting: boolean;
+}) {
+  const answeredCount = questions.filter((_, i) => (answers[i] || "").trim()).length;
+  return (
+    <div className="flex-1 overflow-y-auto px-6 py-6">
+      <div className="max-w-[820px] mx-auto space-y-4">
+        <div className="flex items-center justify-between">
+          <div className="text-[15px] font-semibold text-stone-800">笔试作答</div>
+          <span className="badge badge-muted text-[11px]">
+            已答 {answeredCount} / {questions.length}
+          </span>
+        </div>
+        {questions.map((q, i) => (
+          <div key={i} className="card p-4">
+            <div className="flex items-start gap-2 mb-2">
+              <span
+                className="shrink-0 w-6 h-6 rounded-full flex items-center justify-center text-[11px] font-bold"
+                style={{ background: "var(--accent-bg)", color: "var(--accent)" }}
+              >
+                {i + 1}
+              </span>
+              <div className="flex-1 min-w-0">
+                {(q.focus || q.direction) && (
+                  <div className="mb-1">
+                    {q.focus && <span className="badge badge-accent mr-1.5">{q.focus}</span>}
+                    {q.direction && <span className="badge badge-muted mr-1.5">{q.direction}</span>}
+                  </div>
+                )}
+                <div className="text-[13px] font-semibold text-stone-800">
+                  {q.title}
+                </div>
+              </div>
+            </div>
+            <div className="text-[13px] text-stone-700 leading-relaxed whitespace-pre-wrap mb-3 ml-8">
+              {q.question}
+            </div>
+            <textarea
+              value={answers[i] || ""}
+              onChange={(e) => onAnswerChange(i, e.target.value)}
+              rows={5}
+              className="input"
+              placeholder={`请在此输入第 ${i + 1} 题的回答…`}
+              disabled={submitting}
+            />
+          </div>
+        ))}
+        <div className="flex items-center justify-between pt-2 sticky bottom-0 py-3 -mx-6 px-6"
+          style={{ background: "var(--bg)" }}
+        >
+          <div className="text-[11px] text-stone-400">
+            全部作答完成后点击「提交全部答案」
+          </div>
+          <button
+            onClick={onSubmit}
+            disabled={submitting || answeredCount === 0}
+            className="btn btn-primary"
+          >
+            {submitting ? "提交中…" : "提交全部答案"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── 阶段总结弹层 ──
+function StageSummaryModal({
+  summary,
+  advancing,
+  onAdvance,
+}: {
+  summary: StageSummary;
+  advancing: boolean;
+  onAdvance: () => void;
+}) {
+  const sc = scoreColor(summary.stage_score);
+  const scColor = sc === "success" ? "var(--success)" : sc === "warning" ? "var(--warning)" : "var(--danger)";
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center"
+      style={{ background: "rgba(0,0,0,0.45)" }}
+    >
+      <div
+        className="max-w-[420px] w-full mx-4 rounded-xl p-5 fade-in"
+        style={{ background: "var(--bg-elevated)" }}
+      >
+        <div className="text-[11px] text-stone-400 mb-1">阶段完成</div>
+        <div className="text-[17px] font-semibold text-stone-800 mb-3">
+          {summary.stage_name}
+        </div>
+        <div className="flex items-center gap-4 mb-4">
+          <div className="relative w-16 h-16 shrink-0">
+            <svg className="w-16 h-16 -rotate-90" viewBox="0 0 64 64">
+              <circle cx="32" cy="32" r="27" fill="none" stroke="var(--border)" strokeWidth="5" />
+              <circle
+                cx="32"
+                cy="32"
+                r="27"
+                fill="none"
+                stroke={scColor}
+                strokeWidth="5"
+                strokeLinecap="round"
+                strokeDasharray={`${(summary.stage_score / 100) * 170} 170`}
+              />
+            </svg>
+            <div className="absolute inset-0 flex items-center justify-center">
+              <span className="text-[18px] font-bold" style={{ color: scColor }}>{summary.stage_score}</span>
+            </div>
+          </div>
+          <div className="flex-1 text-[12px] text-stone-600 leading-relaxed">
+            {summary.stage_summary || "—"}
+          </div>
+        </div>
+        {summary.promotion_hint && (
+          <div
+            className="px-3 py-2 rounded-lg text-[12px] mb-4 leading-relaxed"
+            style={{ background: "var(--accent-bg)", color: "var(--accent)" }}
+          >
+            {summary.promotion_hint}
+          </div>
+        )}
+        <div className="flex justify-end">
+          <button
+            onClick={onAdvance}
+            disabled={advancing}
+            className="btn btn-primary"
+          >
+            {advancing ? "进入中…" : "进入下一阶段 →"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── 最终报告 ──
 function FinalReportView({ report }: { report: InterviewReport }) {
   const score = report.overall_score || 0;
@@ -992,6 +1458,49 @@ function FinalReportView({ report }: { report: InterviewReport }) {
             </div>
           </div>
         </div>
+
+        {/* 分阶段成绩 */}
+        {report.stages && report.stages.length > 0 && (
+          <div className="mb-4">
+            <div className="text-[11px] font-semibold text-stone-500 mb-2">分阶段成绩</div>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              {report.stages.map((st, i) => {
+                const stSc = scoreColor(st.stage_score);
+                const stColor = stSc === "success" ? "var(--success)" : stSc === "warning" ? "var(--warning)" : "var(--danger)";
+                return (
+                  <div key={i} className="card p-3">
+                    <div className="flex items-center gap-2 mb-2">
+                      <div className="relative w-12 h-12 shrink-0">
+                        <svg className="w-12 h-12 -rotate-90" viewBox="0 0 48 48">
+                          <circle cx="24" cy="24" r="20" fill="none" stroke="var(--border)" strokeWidth="4" />
+                          <circle
+                            cx="24"
+                            cy="24"
+                            r="20"
+                            fill="none"
+                            stroke={stColor}
+                            strokeWidth="4"
+                            strokeLinecap="round"
+                            strokeDasharray={`${(st.stage_score / 100) * 126} 126`}
+                          />
+                        </svg>
+                        <div className="absolute inset-0 flex items-center justify-center">
+                          <span className="text-[13px] font-bold" style={{ color: stColor }}>{st.stage_score}</span>
+                        </div>
+                      </div>
+                      <div className="text-[12px] font-semibold text-stone-800 leading-tight">
+                        {st.stage_name}
+                      </div>
+                    </div>
+                    <div className="text-[11px] text-stone-500 leading-relaxed line-clamp-3">
+                      {st.stage_summary || "—"}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         {/* 总评 */}
         {report.summary && (

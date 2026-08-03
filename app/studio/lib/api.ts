@@ -22,6 +22,8 @@ import type {
   ResumeTemplate,
   AnalysisSummary,
   ExportResponse,
+  StageConfig,
+  StageSummary,
   StreamAnalysisEvent,
 } from "./types";
 
@@ -298,13 +300,17 @@ export const api = {
   },
 
   // ── 模拟面试 ──
-  startInterview: (analysis_id: string, max_turns = 8) =>
+  startInterview: (
+    analysis_id: string,
+    max_turns = 8,
+    stages?: StageConfig[],
+  ) =>
     postJson<{
       success: boolean;
       state?: InterviewState;
       first_question?: string;
       error?: string;
-    }>("/interview/start", { analysis_id, max_turns }),
+    }>("/interview/start", { analysis_id, max_turns, stages: stages || [] }),
 
   submitInterviewAnswer: (interview_id: string, answer: string) =>
     postJson<{
@@ -320,9 +326,35 @@ export const api = {
       finished?: boolean;
       next_question?: string;
       report?: InterviewReport;
+      stage_completed?: boolean;
+      stage_summary?: StageSummary;
       state?: InterviewState;
       error?: string;
     }>(`/interview/${interview_id}/next`, {}),
+
+  // 笔试批量提交
+  submitWrittenAnswers: (interview_id: string, answers: Record<string, string>) =>
+    postJson<{
+      success: boolean;
+      turns?: InterviewTurn[];
+      stage_score?: number;
+      stage_summary?: string;
+      promotion_hint?: string;
+      state?: InterviewState;
+      error?: string;
+    }>(`/interview/${interview_id}/written/submit`, { answers }),
+
+  // 进入下一阶段(多阶段模式)
+  advanceStage: (interview_id: string) =>
+    postJson<{
+      success: boolean;
+      finished?: boolean;
+      next_question?: string;
+      written_ready?: boolean;
+      report?: InterviewReport;
+      state?: InterviewState;
+      error?: string;
+    }>(`/interview/${interview_id}/advance`, {}),
 
   finishInterview: (interview_id: string) =>
     postJson<{

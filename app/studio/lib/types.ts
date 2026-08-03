@@ -196,6 +196,54 @@ export interface InterviewState {
   finished: boolean;
   company_name: string;
   job_title: string;
+  // 多阶段字段
+  is_multi_stage?: boolean;
+  current_stage_index?: number;
+  current_stage_type?: string | null;
+  current_stage_name?: string | null;
+  stages_progress?: StageProgressItem[];
+  written_questions?: WrittenQuestionItem[];
+}
+
+export interface StageProgressItem {
+  stage_type: string;
+  stage_name: string;
+  status: string;        // pending / in_progress / completed
+  stage_score: number;
+  turns_count: number;
+}
+
+export interface WrittenQuestionItem {
+  index: number;
+  title: string;
+  question: string;
+  focus: string;
+  direction: string;
+}
+
+export interface StageConfig {
+  stage_type: string;    // written / tech_1 / tech_2 / hr
+  stage_name: string;
+  enabled: boolean;
+  question_count: number; // 笔试专用
+}
+
+export interface StageSummary {
+  stage_type: string | null;
+  stage_name: string;
+  stage_score: number;
+  stage_summary: string;
+  promotion_hint: string;
+}
+
+export interface InterviewStageReport {
+  stage_type: string;
+  stage_name: string;
+  status: string;
+  turns: InterviewTurn[];
+  stage_score: number;
+  stage_summary: string;
+  promotion_hint: string;
 }
 
 export interface InterviewReport {
@@ -211,6 +259,8 @@ export interface InterviewReport {
   learning_suggestions: string[];
   summary: string;
   created_at: string;
+  stages?: InterviewStageReport[];
+  stages_completed?: number;
 }
 
 export interface InterviewListItem {
@@ -224,6 +274,8 @@ export interface InterviewListItem {
   overall_score: number;
   rounds_completed: number;
   summary: string;
+  is_multi_stage?: boolean;
+  stages_completed?: number;
 }
 
 // ── 分析记录 ──

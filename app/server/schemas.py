@@ -107,12 +107,20 @@ class InterviewStartRequest(BaseModel):
 
     analysis_id: str = ""
     max_turns: int = 8
+    # 多阶段配置:空则用默认4阶段(笔试/技术一面/技术二面/人事面)
+    stages: List[Dict[str, Any]] = []
 
 
 class InterviewAnswerRequest(BaseModel):
     """提交回答."""
 
     answer: str
+
+
+class WrittenAnswerRequest(BaseModel):
+    """笔试批量提交回答."""
+
+    answers: Dict[str, str] = Field(default_factory=dict, description="题目序号(0-based字符串):回答")
 
 
 class InterviewListResponse(BaseModel):

@@ -10,6 +10,7 @@ from .resume_service import (
     parse_resume_text_to_structured,
 )
 from .interview_service import (
+    DEFAULT_STAGE_CONFIGS,
     InterviewStore,
     MockInterview,
     new_interview,
@@ -29,4 +30,5 @@ __all__ = [
     "MockInterview",
     "InterviewStore",
     "new_interview",
+    "DEFAULT_STAGE_CONFIGS",
 ]

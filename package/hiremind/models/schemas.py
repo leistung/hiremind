@@ -1,5 +1,6 @@
 """Pydantic 模型：定义 HireMind 的输入、输出与中间状态."""
 
+from enum import Enum
 from typing import Annotated, Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
@@ -276,6 +277,43 @@ class InterviewTurn(BaseModel):
     evaluated: bool = Field(default=False, description="是否已评价")
 
 
+# ── 多阶段面试模型 ──
+
+class InterviewStageType(str, Enum):
+    """面试阶段类型."""
+
+    WRITTEN = "written"    # 笔试
+    TECH_1 = "tech_1"      # 技术一面
+    TECH_2 = "tech_2"      # 技术二面
+    HR = "hr"              # 人事面/性格测试
+
+
+class StageConfig(BaseModel):
+    """单个阶段配置(启动面试时传入)."""
+
+    stage_type: InterviewStageType
+    stage_name: str = ""
+    enabled: bool = True
+    # 笔试专用:题数(其他阶段忽略,逐题进行)
+    # 校验放宽为 1-20:对话阶段也会带 question_count(=max_turns,可能 <5),
+    # 笔试的实际 5-20 限制由前端滑块 + _generate_written_questions 内 clamp 保证
+    question_count: int = Field(default=15, ge=1, le=20, description="笔试题数")
+
+
+class InterviewStageTurn(BaseModel):
+    """单个阶段的成绩记录."""
+
+    stage_type: InterviewStageType
+    stage_name: str = ""
+    status: str = "pending"    # pending / in_progress / completed
+    turns: List[InterviewTurn] = Field(default_factory=list)
+    stage_score: int = Field(default=0, ge=0, le=100, description="本阶段得分 0-100")
+    stage_summary: str = ""
+    promotion_hint: str = ""   # 软晋级提示
+    # 笔试阶段:一次性生成的题目列表(提交前保存)
+    written_questions: List[Question] = Field(default_factory=list)
+
+
 class InterviewReport(BaseModel):
     """模拟面试最终报告."""
 
@@ -291,3 +329,6 @@ class InterviewReport(BaseModel):
     learning_suggestions: List[str] = Field(default_factory=list, description="学习建议")
     summary: str = Field(default="", description="总评")
     created_at: str = ""
+    # 新增:分阶段成绩(空列表表示旧版单场面试)
+    stages: List[InterviewStageTurn] = Field(default_factory=list, description="分阶段成绩")
+    stages_completed: int = 0

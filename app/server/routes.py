@@ -6,17 +6,25 @@ import threading
 import time
 import uuid
 from pathlib import Path
+from typing import List
 
 from fastapi import APIRouter, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse, StreamingResponse
 
-from hiremind.models.schemas import InterviewResult, Position, ResumeData
+from hiremind.models.schemas import (
+    InterviewResult,
+    InterviewStageType,
+    Position,
+    ResumeData,
+    StageConfig,
+)
 from hiremind.services import (
     InterviewStore,
     MockInterview,
     PositionStore,
     ResumeStore,
     TEMPLATES,
+    DEFAULT_STAGE_CONFIGS,
     export_resume_pdf,
     export_resume_word,
     generate_pdf,
@@ -59,6 +67,7 @@ from .schemas import (
     ResumeExportRequest,
     ResumeListResponse,
     ResumeParseRequest,
+    WrittenAnswerRequest,
 )
 
 router = APIRouter()
@@ -798,7 +807,7 @@ async def delete_position(position_id: str):
 
 def _serialize_interview_state(iv: MockInterview) -> dict:
     """把 MockInterview 序列化为前端可用的状态."""
-    return {
+    state = {
         "interview_id": iv.id,
         "status": iv.status,
         "current_question": iv.current_question.question if iv.current_question else None,
@@ -813,12 +822,61 @@ def _serialize_interview_state(iv: MockInterview) -> dict:
         "finished": iv.status == "finished",
         "company_name": iv.result.company_name,
         "job_title": iv.result.job_title,
+        # 多阶段字段
+        "is_multi_stage": iv.is_multi_stage,
+        "current_stage_index": iv.current_stage_index,
+        "current_stage_type": (
+            iv.stages[iv.current_stage_index].stage_type.value
+            if iv.is_multi_stage
+            and iv.current_stage_index < len(iv.stages)
+            and iv.stages[iv.current_stage_index].status != "completed"
+            else None
+        ),
+        "current_stage_name": (
+            iv.stages[iv.current_stage_index].stage_name
+            if iv.is_multi_stage
+            and iv.current_stage_index < len(iv.stages)
+            and iv.stages[iv.current_stage_index].status != "completed"
+            else None
+        ),
+        "stages_progress": [
+            {
+                "stage_type": s.stage_type.value,
+                "stage_name": s.stage_name,
+                "status": s.status,
+                "stage_score": s.stage_score,
+                "turns_count": len(s.turns),
+            }
+            for s in iv.stages
+        ] if iv.is_multi_stage else [],
+        # 笔试阶段:题目列表(不含参考答案)
+        "written_questions": (
+            [
+                {
+                    "index": i,
+                    "title": q.title,
+                    "question": q.question,
+                    "focus": q.focus,
+                    "direction": q.direction,
+                }
+                for i, q in enumerate(iv.stages[iv.current_stage_index].written_questions)
+            ]
+            if iv.is_multi_stage
+            and iv.current_stage_index < len(iv.stages)
+            and iv.stages[iv.current_stage_index].stage_type == InterviewStageType.WRITTEN
+            and iv.stages[iv.current_stage_index].status == "in_progress"
+            else []
+        ),
     }
+    return state
 
 
 @router.post("/interview/start", tags=["Interview"])
 def start_interview(req: InterviewStartRequest):
-    """启动一场模拟面试,基于指定分析的分析结果."""
+    """启动一场模拟面试,基于指定分析的分析结果.
+
+    支持多阶段:若 req.stages 非空则用多阶段模式,否则用旧版单场模式。
+    """
     try:
         agent = get_agent()
         # 恢复指定分析
@@ -836,12 +894,25 @@ def start_interview(req: InterviewStartRequest):
         if not result_data:
             return {"success": False, "error": "该分析尚未生成报告,请先在分析页生成报告"}
         result = InterviewResult.model_validate(result_data)
+
+        # 解析阶段配置:空则用默认4阶段
+        stage_configs: List[StageConfig] = []
+        if req.stages:
+            for s in req.stages:
+                if not s.get("enabled", True):
+                    continue
+                stage_configs.append(StageConfig.model_validate(s))
+        if not stage_configs and req.stages is not None and len(req.stages) > 0:
+            # 全部被禁用,回退到默认
+            stage_configs = list(DEFAULT_STAGE_CONFIGS)
+
         iv = new_interview(
             analysis_id=agent.analysis["id"],
             result=result,
             resume_text="",
             max_turns=req.max_turns,
             model_client=agent.model_client,
+            stage_configs=stage_configs or None,
         )
         first_q = iv.start()
         store = get_interview_store()
@@ -875,7 +946,7 @@ def submit_answer(interview_id: str, req: InterviewAnswerRequest):
 
 @router.post("/interview/{interview_id}/next", tags=["Interview"])
 def next_question(interview_id: str):
-    """生成下一道题(或结束面试)."""
+    """生成下一道题(或结束面试/阶段完成)."""
     store = get_interview_store()
     agent = get_agent()
     iv = store.load(interview_id, model_client=agent.model_client)
@@ -891,6 +962,86 @@ def next_question(interview_id: str):
                 "success": True,
                 "finished": True,
                 "report": report.model_dump(),
+                "state": _serialize_interview_state(iv),
+            }
+        if result == "__STAGE_COMPLETED__":
+            # 当前阶段已完成,等待前端调用 /advance 进入下一阶段
+            stage = iv.current_stage
+            return {
+                "success": True,
+                "finished": False,
+                "stage_completed": True,
+                "stage_summary": {
+                    "stage_type": stage.stage_type.value if stage else None,
+                    "stage_name": stage.stage_name if stage else "",
+                    "stage_score": stage.stage_score if stage else 0,
+                    "stage_summary": stage.stage_summary if stage else "",
+                    "promotion_hint": stage.promotion_hint if stage else "",
+                } if stage else None,
+                "state": _serialize_interview_state(iv),
+            }
+        return {
+            "success": True,
+            "finished": False,
+            "next_question": result,
+            "state": _serialize_interview_state(iv),
+        }
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
+
+@router.post("/interview/{interview_id}/written/submit", tags=["Interview"])
+def submit_written_answers(interview_id: str, req: WrittenAnswerRequest):
+    """笔试批量提交答案,返回逐题评价 + 阶段总结."""
+    store = get_interview_store()
+    agent = get_agent()
+    iv = store.load(interview_id, model_client=agent.model_client)
+    if not iv:
+        raise HTTPException(status_code=404, detail="Interview not found")
+    try:
+        # answers 键是字符串序号,转成 int
+        answers = {int(k): v for k, v in req.answers.items()}
+        result = iv.submit_written_answers(answers)
+        store.save(iv)
+        return {
+            "success": True,
+            "turns": result["turns"],
+            "stage_score": result["stage_score"],
+            "stage_summary": result["stage_summary"],
+            "promotion_hint": result["promotion_hint"],
+            "state": _serialize_interview_state(iv),
+        }
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
+
+@router.post("/interview/{interview_id}/advance", tags=["Interview"])
+def advance_stage(interview_id: str):
+    """进入下一个面试阶段(多阶段模式)."""
+    store = get_interview_store()
+    agent = get_agent()
+    iv = store.load(interview_id, model_client=agent.model_client)
+    if not iv:
+        raise HTTPException(status_code=404, detail="Interview not found")
+    if not iv.is_multi_stage:
+        return {"success": False, "error": "当前面试不是多阶段模式"}
+    try:
+        result = iv.advance_to_next_stage()
+        store.save(iv)
+        if result == "__INTERVIEW_FINISHED__":
+            report = iv.build_final_report()
+            store.save(iv)
+            return {
+                "success": True,
+                "finished": True,
+                "report": report.model_dump(),
+                "state": _serialize_interview_state(iv),
+            }
+        if result == "__WRITTEN_READY__":
+            return {
+                "success": True,
+                "finished": False,
+                "written_ready": True,
                 "state": _serialize_interview_state(iv),
             }
         return {

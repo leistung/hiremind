@@ -275,3 +275,99 @@ INTERVIEW_FINAL_REPORT_PROMPT = ChatPromptTemplate.from_messages(
         ),
     ]
 )
+
+
+# ── 多阶段面试 Prompt ──
+
+WRITTEN_EXAM_GENERATOR_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "你是大厂笔试出题官。请基于面试分析报告，生成 {question_count} 道笔试题。"
+            "题目应覆盖岗位核心技能与基础知识，题型以简答题为主（也可含少量编程/设计题）。"
+            "每道题必须包含：\n"
+            "- direction：方向标签（技术/业务场景/基础 之一）\n"
+            "- title：题目标题（一句话概括）\n"
+            "- question：完整题目内容\n"
+            "- focus：考察点\n"
+            "- reference_answer：参考答案要点（用于评分，不展示给候选人）\n\n"
+            "题目要贴合 JD 和简历，不能是通用题库。难度分布：基础题 40%、中等 40%、较难 20%。"
+            "用中文。",
+        ),
+        (
+            "human",
+            "目标公司：{company_name}\n"
+            "目标岗位：{job_title}\n\n"
+            "匹配度分析：\n{match_analysis}\n\n"
+            "业务场景：\n{business_scenarios}\n\n"
+            "风险点：\n{risks}\n\n"
+            "JD 画像：\n{jd_profile}\n\n"
+            "请生成 {question_count} 道笔试题。",
+        ),
+    ]
+)
+
+
+WRITTEN_BATCH_EVALUATE_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "你是笔试阅卷官。请对候选人提交的笔试答案逐题评价。每题输出：\n"
+            "- evaluation：对该题回答的评价（1-2 句话，指出对错与不足）\n"
+            "- score：本题得分 0-10（整数），参考答案对比评分\n"
+            "- improvements：0-2 条改进建议\n\n"
+            "评分要客观：答对要点得高分，遗漏关键点扣分，完全错误 0 分。",
+        ),
+        (
+            "human",
+            "目标公司：{company_name}\n"
+            "目标岗位：{job_title}\n\n"
+            "以下是需要评价的题目与候选人回答（共 {count} 题）：\n\n{qa_pairs}\n\n"
+            "请逐题输出评价。",
+        ),
+    ]
+)
+
+
+STAGE_SUMMARY_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "你是面试官。一个面试阶段已结束，请给出该阶段的总结：\n"
+            "- stage_score：本阶段得分 0-100（整数）\n"
+            "- stage_summary：本阶段评语（2-4 句话，概括表现）\n"
+            "- promotion_hint：晋级提示（1 句话）\n"
+            "  若表现优秀（≥70分）：如「表现优秀，进入下一阶段」\n"
+            "  若表现一般（50-69分）：如「基本合格，真实场景可能险过，继续努力」\n"
+            "  若表现不佳（<50分）：如「表现不理想，真实场景可能被淘汰，但练习继续」",
+        ),
+        (
+            "human",
+            "目标公司：{company_name}\n"
+            "目标岗位：{job_title}\n"
+            "当前阶段：{stage_name}\n\n"
+            "本阶段问答记录：\n{stage_log}\n\n"
+            "请输出阶段总结。",
+        ),
+    ]
+)
+
+
+STAGE_FIRST_QUESTION_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "你是面试官，正在主持「{stage_name}」。请基于面试分析报告提出第一个问题。"
+            "问题应贴合该阶段定位，口语化、自然地提出。"
+            "直接给出问题本身，不要解释出题意图。用中文，语气专业、友善。",
+        ),
+        (
+            "human",
+            "目标公司：{company_name}\n"
+            "目标岗位：{job_title}\n\n"
+            "面试分析报告摘要：\n{analysis_summary}\n\n"
+            "该阶段可用题目：\n{stage_questions}\n\n"
+            "请提出该阶段的第一个面试问题。",
+        ),
+    ]
+)
