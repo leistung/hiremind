@@ -5,7 +5,7 @@ from .memory import HireMindMemory
 from .models.schemas import InterviewInput, InterviewResult
 from .run_store import RunStore
 from .runtime import HireMindAgent
-from .session_store import SessionStore, new_session
+from .analysis_store import AnalysisStore, new_analysis
 from .task_state import TaskState
 from .workspace import HireMindWorkspace
 
@@ -17,7 +17,7 @@ __all__ = [
     "InterviewInput",
     "InterviewResult",
     "RunStore",
-    "SessionStore",
+    "AnalysisStore",
     "TaskState",
-    "new_session",
+    "new_analysis",
 ]

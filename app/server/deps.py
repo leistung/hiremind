@@ -3,7 +3,7 @@
 from functools import lru_cache
 from pathlib import Path
 
-from hiremind import HireMindAgent, HireMindWorkspace, RunStore, SessionStore
+from hiremind import HireMindAgent, HireMindWorkspace, RunStore, AnalysisStore
 from hiremind.services import InterviewStore, PositionStore, ResumeStore, get_llm
 from hiremind.services.llm_service import get_llm as _get_llm
 
@@ -45,7 +45,7 @@ def get_agent(
     return HireMindAgent(
         model_client=llm,
         workspace=ws,
-        session_store=SessionStore(ws.sessions_dir),
+        analysis_store=AnalysisStore(ws.analyses_dir),
         run_store=RunStore(ws.runs_dir),
     )
 

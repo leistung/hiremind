@@ -280,7 +280,7 @@ class InterviewReport(BaseModel):
     """模拟面试最终报告."""
 
     interview_id: str
-    session_id: str = Field(default="", description="关联的分析 session_id")
+    analysis_id: str = Field(default="", description="关联的分析 analysis_id")
     company_name: str = ""
     job_title: str = ""
     overall_score: int = Field(default=0, ge=0, le=100, description="综合评分 0-100")

@@ -55,6 +55,7 @@ const COLLAPSE_KEY = "hiremind:sidebar-collapsed";
 export default function Sidebar() {
   const pathname = usePathname();
   const [backendOk, setBackendOk] = useState<boolean | null>(null);
+  const [modelName, setModelName] = useState("");
   // 折叠状态：从 localStorage 读取,默认展开
   const [collapsed, setCollapsed] = useState(false);
   // 避免首屏 hydration mismatch：先渲染为 false,挂载后再同步 localStorage
@@ -71,14 +72,33 @@ export default function Sidebar() {
     localStorage.setItem(COLLAPSE_KEY, collapsed ? "1" : "0");
   }, [collapsed, mounted]);
 
-  useEffect(() => {
+  // 拉取后端健康状态与当前模型信息
+  const fetchModelInfo = () => {
     let active = true;
     api
       .health()
-      .then(() => active && setBackendOk(true))
+      .then(() => {
+        if (!active) return;
+        setBackendOk(true);
+        // 后端 OK 后拉取当前模型信息
+        api.getModelInfo().then((info) => {
+          if (active) setModelName(info.model || "");
+        }).catch(() => {});
+      })
       .catch(() => active && setBackendOk(false));
     return () => {
       active = false;
+    };
+  };
+
+  useEffect(() => {
+    const cleanup = fetchModelInfo();
+    // 监听全局事件:设置页修改模型后触发刷新
+    const onModelChanged = () => fetchModelInfo();
+    window.addEventListener("hiremind:model-changed", onModelChanged);
+    return () => {
+      cleanup();
+      window.removeEventListener("hiremind:model-changed", onModelChanged);
     };
   }, []);
 
@@ -280,6 +300,23 @@ export default function Sidebar() {
             </span>
           )}
         </div>
+        {/* 当前模型 */}
+        {backendOk && modelName && !collapsed && (
+          <div
+            className="flex items-center gap-1.5 rounded-lg text-[11px] mt-1 px-3 py-2"
+            style={{
+              background: "var(--bg-elevated)",
+              border: "1px solid var(--border)",
+              color: "var(--fg-muted)",
+            }}
+            title={`当前模型: ${modelName}`}
+          >
+            <svg className="w-3 h-3 shrink-0" fill="none" stroke="currentColor" strokeWidth={1.8} viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
+            </svg>
+            <span className="truncate">{modelName}</span>
+          </div>
+        )}
       </div>
     </aside>
   );

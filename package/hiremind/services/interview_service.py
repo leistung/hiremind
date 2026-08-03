@@ -67,14 +67,14 @@ class MockInterview:
     def __init__(
         self,
         interview_id: str,
-        session_id: str,
+        analysis_id: str,
         result: InterviewResult,
         resume_text: str = "",
         max_turns: int = 8,
         model_client: Optional[BaseChatModel] = None,
     ):
         self.id = interview_id
-        self.session_id = session_id
+        self.analysis_id = analysis_id
         self.result = result
         self.resume_text = resume_text
         self.max_turns = max_turns
@@ -303,7 +303,7 @@ class MockInterview:
         self.status = "finished"
         self.report = InterviewReport(
             interview_id=self.id,
-            session_id=self.session_id,
+            analysis_id=self.analysis_id,
             company_name=self.result.company_name,
             job_title=self.result.job_title,
             overall_score=overall,
@@ -341,7 +341,7 @@ class MockInterview:
     def to_dict(self) -> dict:
         return {
             "id": self.id,
-            "session_id": self.session_id,
+            "analysis_id": self.analysis_id,
             "status": self.status,
             "turns": [t.model_dump() for t in self.turns],
             "current_question": self.current_question.model_dump() if self.current_question else None,
@@ -358,7 +358,7 @@ class MockInterview:
         result = InterviewResult.model_validate(data["result"])
         inst = cls(
             interview_id=data["id"],
-            session_id=data.get("session_id", ""),
+            analysis_id=data.get("analysis_id", ""),
             result=result,
             resume_text=data.get("resume_text", ""),
             max_turns=data.get("max_turns", 8),
@@ -415,7 +415,7 @@ class InterviewStore:
                 report = data.get("report") or {}
                 items.append({
                     "id": data["id"],
-                    "session_id": data.get("session_id", ""),
+                    "analysis_id": data.get("analysis_id", ""),
                     "status": data.get("status", ""),
                     "company_name": data.get("result", {}).get("company_name", ""),
                     "job_title": data.get("result", {}).get("job_title", ""),
@@ -438,7 +438,7 @@ class InterviewStore:
 
 
 def new_interview(
-    session_id: str,
+    analysis_id: str,
     result: InterviewResult,
     resume_text: str = "",
     max_turns: int = 8,
@@ -447,7 +447,7 @@ def new_interview(
     """创建一场新的模拟面试."""
     return MockInterview(
         interview_id=f"iv-{uuid.uuid4().hex[:12]}",
-        session_id=session_id,
+        analysis_id=analysis_id,
         result=result,
         resume_text=resume_text,
         max_turns=max_turns,

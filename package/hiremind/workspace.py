@@ -13,7 +13,7 @@ class HireMindWorkspace:
 
     管理以下目录结构：
         .hiremind/
-        ├── sessions/    # 会话 JSON
+        ├── analyses/    # 分析 JSON(每次分析一份)
         ├── runs/        # 单次运行审计
         ├── memory/      # 持久记忆
         ├── reports/     # 导出的报告文件
@@ -26,7 +26,7 @@ class HireMindWorkspace:
     def __init__(self, root: Path):
         self.root = Path(root)
         self.hiremind_dir = self.root / ".hiremind"
-        self.sessions_dir = self.hiremind_dir / "sessions"
+        self.analyses_dir = self.hiremind_dir / "analyses"
         self.runs_dir = self.hiremind_dir / "runs"
         self.memory_dir = self.hiremind_dir / "memory"
         self.reports_dir = self.hiremind_dir / "reports"
@@ -39,7 +39,7 @@ class HireMindWorkspace:
         """确保所有子目录存在."""
         for d in (
             self.hiremind_dir,
-            self.sessions_dir,
+            self.analyses_dir,
             self.runs_dir,
             self.memory_dir,
             self.memory_dir / "resumes",
@@ -99,7 +99,7 @@ class HireMindWorkspace:
     def fingerprint(self) -> str:
         """工作区状态指纹（用于判断是否有变化）."""
         h = hashlib.sha256()
-        for d in (self.sessions_dir, self.runs_dir, self.reports_dir):
+        for d in (self.analyses_dir, self.runs_dir, self.reports_dir):
             if d.exists():
                 for f in sorted(d.rglob("*")):
                     if f.is_file():

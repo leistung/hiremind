@@ -166,8 +166,9 @@ export interface InterviewResult {
 export interface AnalysisResponse {
   success: boolean;
   result: InterviewResult | null;
-  session_id: string;
+  analysis_id: string;
   error?: string;
+  model?: string;
 }
 
 // ── 模拟面试 ──
@@ -199,7 +200,7 @@ export interface InterviewState {
 
 export interface InterviewReport {
   interview_id: string;
-  session_id: string;
+  analysis_id: string;
   company_name: string;
   job_title: string;
   overall_score: number;
@@ -214,7 +215,7 @@ export interface InterviewReport {
 
 export interface InterviewListItem {
   id: string;
-  session_id: string;
+  analysis_id: string;
   status: string;
   company_name: string;
   job_title: string;
@@ -225,26 +226,44 @@ export interface InterviewListItem {
   summary: string;
 }
 
-// ── 历史记录 ──
+// ── 分析记录 ──
 
-export interface AnalysisHistoryItem {
-  session_id: string;
+export interface AnalysisSummary {
+  id: string;
   title: string;
+  status: "pending" | "completed" | "error" | "cancelled";
   company_name: string;
   job_title: string;
   match_score: number;
   rounds_count: number;
+  message_count: number;
   created_at: string;
   updated_at: string;
+  metadata: Record<string, unknown>;
 }
 
-export interface AnalysisHistoryDetail {
+export interface AnalysisDetail {
   success: boolean;
-  session_id: string;
+  analysis_id: string;
   title: string;
+  status: "pending" | "completed" | "error" | "cancelled";
   created_at: string;
   updated_at: string;
-  result: InterviewResult;
+  result: InterviewResult | null;
+  error?: string;
+  model?: string;
+}
+
+// SSE 流式进度事件:后端 stream_analysis_progress 推送的 payload
+export interface StreamAnalysisProgress {
+  completed: { node: string; label: string }[];
+  current: string | null;
+}
+export interface StreamAnalysisEvent {
+  status?: "pending" | "completed" | "error" | "cancelled";
+  progress?: StreamAnalysisProgress;
+  result?: InterviewResult;
+  error?: string;
 }
 
 export interface InterviewReportDetail {
@@ -267,7 +286,7 @@ export interface ChatMessage {
 
 export interface ChatResponse {
   answer: string;
-  session_id: string;
+  analysis_id: string;
   result?: InterviewResult | null;
   error?: string;
 }
@@ -299,7 +318,7 @@ export interface ModelTestResponse {
   error: string;
 }
 
-export interface SessionSummary {
+export interface AnalysisSummary {
   id: string;
   title: string;
   created_at: string;

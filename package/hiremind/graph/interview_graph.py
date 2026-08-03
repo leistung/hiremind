@@ -1,5 +1,7 @@
 """LangGraph 工作流：JD + 简历 → 匹配度/业务场景/风险/五方向面试题."""
 
+from typing import Iterator, Tuple
+
 from langgraph.graph import END, START, StateGraph
 
 from ..models.schemas import InterviewInput, InterviewResult, InterviewState
@@ -12,6 +14,17 @@ from ..nodes import (
     parse_jd,
     parse_resume,
 )
+
+# 节点中文标签:用于流式进度展示
+NODE_LABELS = {
+    "parse_jd": "解析岗位要求",
+    "parse_resume": "解析简历",
+    "analyze_match": "匹配度分析",
+    "infer_scenarios": "推断业务场景",
+    "identify_risks": "识别风险点",
+    "generate_questions": "生成面试题",
+    "generate_tips": "生成准备建议",
+}
 
 
 class InterviewGraph:
@@ -70,3 +83,30 @@ class InterviewGraph:
             questions=final_state["questions"],
             preparation_tips=final_state.get("preparation_tips") or [],
         )
+
+    def stream_run(self, input_data: InterviewInput) -> Iterator[Tuple[str, str, dict]]:
+        """流式执行工作流,逐节点 yield (node_name, label, state_dict) 进度.
+
+        每完成一个节点,yield 一次。最后 yield ("done", "完成", final_state_dict)。
+        调用方可从 final_state_dict 组装 InterviewResult,无需二次 invoke。
+        注意:返回的是 dict(而非 InterviewState 实例),因为 LangGraph 流式
+        返回的 patch 是 dict,合并需要 dict 形式。
+        """
+        initial_state = InterviewState(input=input_data)
+        # 用 dict 累积状态(InterviewState 是 BaseModel 不能用 ** 展开)
+        final_state: dict = {"input": input_data}
+        # stream_mode="updates":每个节点完成后 yield {node_name: state_patch}
+        for chunk in self._graph.stream(initial_state, stream_mode="updates"):
+            for node_name, patch in chunk.items():
+                if node_name in NODE_LABELS:
+                    # patch 可能是 dict 或 BaseModel,统一转 dict 合并
+                    if isinstance(patch, dict):
+                        final_state.update(patch)
+                    elif hasattr(patch, "model_dump"):
+                        final_state.update(patch.model_dump())
+                    yield (node_name, NODE_LABELS[node_name], final_state)
+
+        if final_state.get("error"):
+            raise RuntimeError(final_state["error"])
+
+        yield ("done", "完成", final_state)

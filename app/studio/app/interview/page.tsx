@@ -5,6 +5,7 @@ import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { api } from "@/lib/api";
 import { scoreColor } from "@/lib/utils";
+import ModelBadge from "@/components/ModelBadge";
 import type {
   InterviewReport,
   InterviewState,
@@ -24,6 +25,38 @@ interface ChatItem {
   ts: number;
 }
 
+// sessionStorage 持久化结构:切换页面再回来时恢复面试状态
+interface PersistedInterviewState {
+  interviewId: string;
+  phase: Phase;
+  chat: ChatItem[];
+  maxTurns: number;
+  interviewModel: string;
+  state: InterviewState | null;
+  report: InterviewReport | null;
+  savedAt: number;
+}
+
+const INTERVIEW_STATE_KEY = "hiremind:interview-state-v1";
+// 启动中意图:整页刷新后用 listInterviews 恢复
+const INTERVIEW_STARTING_KEY = "hiremind:interview-starting-v1";
+
+// 模块级 in-flight 启动请求:软导航(切换页面再回来)不会重置模块级变量,
+// 同一个 promise 可被多次 await,从而跨组件卸载/重载保持启动状态
+interface InflightStart {
+  analysisId: string;
+  maxTurns: number;
+  interviewModel: string;
+  promise: Promise<{
+    success: boolean;
+    state?: InterviewState;
+    first_question?: string;
+    error?: string;
+  }>;
+  startedAt: number;
+}
+let inflightStart: InflightStart | null = null;
+
 export default function InterviewPageWrapper() {
   return (
     <Suspense fallback={<div className="p-8 text-stone-400">加载中…</div>}>
@@ -34,7 +67,12 @@ export default function InterviewPageWrapper() {
 
 function InterviewPage() {
   const searchParams = useSearchParams();
-  const presetSessionId = searchParams.get("session") || "";
+  const presetAnalysisId = searchParams.get("analysis") || "";
+
+  // 恢复标记:仅初始化时读取一次 sessionStorage
+  const [restored, setRestored] = useState(false);
+  // 恢复中:从 sessionStorage 读到数据,正在从后端拉最新 state
+  const [restoring, setRestoring] = useState(false);
 
   const [state, setState] = useState<InterviewState | null>(null);
   const [report, setReport] = useState<InterviewReport | null>(null);
@@ -43,16 +81,191 @@ function InterviewPage() {
   const [phase, setPhase] = useState<Phase>("idle");
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState("");
-  const [maxTurns, setMaxTurns] = useState(8);
+  const [maxTurns, setMaxTurns] = useState(2);
+  // 本次面试启动时使用的模型(启动后修改全局配置不影响显示)
+  const [interviewModel, setInterviewModel] = useState("");
+  // 停止确认弹窗
+  const [showStopConfirm, setShowStopConfirm] = useState(false);
+  // 分析记录 ID(提升到父级,启动中也能在输入框显示)
+  const [analysisId, setAnalysisId] = useState(presetAnalysisId);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const answerRef = useRef<HTMLTextAreaElement>(null);
-
+  // 组件挂载状态:启动请求 await 后判断是否还能 setState
+  const mountedRef = useRef(true);
   useEffect(() => {
-    if (presetSessionId) {
-      startWithSession(presetSessionId);
-    }
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
   }, []);
+
+  // 初始化恢复:优先级 inflight(软导航) > starting-key(整页刷新) > 面试状态(对话中)
+  useEffect(() => {
+    // 1. 软导航恢复:模块级 inflight 请求仍在进行中或已结算
+    //    (切换页面再回来,同一个 promise 可继续 await,不会创建重复面试)
+    if (inflightStart) {
+      const inflight = inflightStart;
+      setStarting(true);
+      setAnalysisId(inflight.analysisId);
+      setMaxTurns(inflight.maxTurns);
+      setInterviewModel(inflight.interviewModel);
+      setRestored(true);
+      (async () => {
+        try {
+          const r = await inflight.promise;
+          if (!mountedRef.current) return; // 再次离开页面,保留 inflight 供下次恢复
+          if (r.success && r.state) {
+            setState(r.state);
+            setChat([
+              { kind: "system", content: `面试开始 · ${r.state.company_name} · ${r.state.job_title} · 共 ${r.state.max_turns} 轮`, ts: Date.now() },
+              { kind: "question", content: r.state.current_question || "", focus: r.state.current_focus || undefined, rationale: r.state.current_rationale || undefined, referenceAnswer: r.state.current_reference_answer || undefined, ts: Date.now() },
+            ]);
+            setPhase("answering");
+            setTimeout(() => answerRef.current?.focus(), 100);
+          } else {
+            setError(r.error || "启动失败,请先在分析页生成报告");
+            setPhase("idle");
+          }
+        } catch {
+          if (!mountedRef.current) return;
+          setError("请求失败,请检查后端服务");
+          setPhase("idle");
+        } finally {
+          if (mountedRef.current) {
+            inflightStart = null;
+            try { sessionStorage.removeItem(INTERVIEW_STARTING_KEY); } catch {}
+            setStarting(false);
+          }
+        }
+      })();
+      return;
+    }
+
+    // 2. 整页刷新恢复:sessionStorage 记录了启动意图,后端可能已完成创建
+    //    通过 listInterviews 查找该分析下最近创建的进行中面试
+    try {
+      const sraw = sessionStorage.getItem(INTERVIEW_STARTING_KEY);
+      if (sraw) {
+        const s = JSON.parse(sraw);
+        // 仅恢复 5 分钟内的启动意图
+        if (s.savedAt && Date.now() - s.savedAt < 5 * 60 * 1000 && s.analysisId) {
+          setRestoring(true);
+          setAnalysisId(s.analysisId);
+          setMaxTurns(s.maxTurns || 2);
+          setInterviewModel(s.interviewModel || "");
+          setRestored(true);
+          (async () => {
+            try {
+              const list = await api.listInterviews();
+              if (!mountedRef.current) return;
+              // 查找该分析下最近创建的进行中面试(list_all 已按时间倒序)
+              const recent = list.interviews.find(
+                (iv) => iv.analysis_id === s.analysisId && iv.status === "in_progress"
+              );
+              if (recent) {
+                const sr = await api.getInterviewState(recent.id);
+                if (!mountedRef.current) return;
+                if (sr.success && sr.state) {
+                  setState(sr.state);
+                  setChat([
+                    { kind: "system", content: `面试开始 · ${sr.state.company_name} · ${sr.state.job_title} · 共 ${sr.state.max_turns} 轮`, ts: Date.now() },
+                    { kind: "question", content: sr.state.current_question || "", focus: sr.state.current_focus || undefined, rationale: sr.state.current_rationale || undefined, referenceAnswer: sr.state.current_reference_answer || undefined, ts: Date.now() },
+                  ]);
+                  setPhase("answering");
+                  setRestoring(false);
+                  setTimeout(() => answerRef.current?.focus(), 100);
+                  return;
+                }
+              }
+            } catch {}
+            // 未找到或出错:清除启动意图,回到 StartView
+            if (!mountedRef.current) return;
+            try { sessionStorage.removeItem(INTERVIEW_STARTING_KEY); } catch {}
+            setRestoring(false);
+          })();
+          return;
+        }
+        try { sessionStorage.removeItem(INTERVIEW_STARTING_KEY); } catch {}
+      }
+    } catch {}
+
+    // 3. 已进入对话的恢复:sessionStorage 面试状态
+    try {
+      const raw = sessionStorage.getItem(INTERVIEW_STATE_KEY);
+      if (raw) {
+        const ps = JSON.parse(raw) as PersistedInterviewState;
+        // 仅恢复进行中的面试(idle/finished 不恢复,让用户重新开始)
+        // 必须有 state 字段,否则旧版本数据无法完整恢复
+        if (ps.interviewId && ps.state && ps.phase !== "idle" && ps.phase !== "finished") {
+          setRestoring(true);
+          setMaxTurns(ps.maxTurns || 2);
+          setInterviewModel(ps.interviewModel || "");
+          setChat(ps.chat || []);
+          setReport(ps.report || null);
+          setPhase(ps.phase);
+          // 关键:先从 sessionStorage 恢复 state,保证 UI 立即可用
+          // (即使后端调用失败,用户也能看到之前的面试状态)
+          if (ps.state) setState(ps.state);
+          // 异步从后端拉取最新 state,仅用于同步 finished/abandoned 状态
+          // 失败时保留本地状态,不清空(避免后端临时不可用导致丢失面试)
+          api.getInterviewState(ps.interviewId).then((r) => {
+            setRestoring(false);
+            if (r.success && r.state) {
+              setState(r.state);
+              // 后端显示已 finished/abandoned,同步本地状态
+              if (r.state.status === "finished") {
+                setPhase("finished");
+              } else if (r.state.status === "abandoned") {
+                sessionStorage.removeItem(INTERVIEW_STATE_KEY);
+                setPhase("idle");
+                setChat([]);
+                setState(null);
+                setError("上次面试已被放弃,请重新开始");
+              }
+            }
+            // 后端返回失败(HTTP 200 但 success=false):保留本地状态
+          }).catch(() => {
+            setRestoring(false);
+            // 网络错误/404:保留本地状态,用户可继续面试
+            // (避免后端临时不可用导致丢失进行中的面试)
+          });
+        } else {
+          // 已完成或无 id,清掉避免重复恢复
+          sessionStorage.removeItem(INTERVIEW_STATE_KEY);
+        }
+      }
+    } catch {}
+    setRestored(true);
+  }, []);
+
+  // 持久化:面试进行中任一状态变化时同步到 sessionStorage
+  useEffect(() => {
+    if (!restored) return;
+    // idle/finished 不持久化(避免恢复已完成面试)
+    if (phase === "idle" || phase === "finished") {
+      try {
+        sessionStorage.removeItem(INTERVIEW_STATE_KEY);
+      } catch {}
+      return;
+    }
+    if (!state?.interview_id) return;
+    const ps: PersistedInterviewState = {
+      interviewId: state.interview_id,
+      phase,
+      chat,
+      maxTurns,
+      interviewModel,
+      state,
+      report,
+      savedAt: Date.now(),
+    };
+    try {
+      sessionStorage.setItem(INTERVIEW_STATE_KEY, JSON.stringify(ps));
+      // 调试:确认写入
+      console.log("[interview] persisted to sessionStorage:", ps.interviewId, ps.phase);
+    } catch {}
+  }, [restored, phase, chat, maxTurns, interviewModel, state, report]);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -60,13 +273,41 @@ function InterviewPage() {
     }
   }, [chat, phase]);
 
-  async function startWithSession(sessionId: string) {
+  async function startWithAnalysis(idToStart: string) {
     setStarting(true);
+    setAnalysisId(idToStart);
     setError("");
     setChat([]);
     setReport(null);
     try {
-      const r = await api.startInterview(sessionId, maxTurns);
+      // 启动面试前拉取当前模型,用于本次面试期间冻结显示
+      let model = "";
+      try {
+        const info = await api.getModelInfo();
+        model = info.model || "";
+        setInterviewModel(model);
+      } catch {}
+      // 创建 promise 并存到模块级,使切换页面再回来时能 await 同一个 promise
+      const promise = api.startInterview(idToStart, maxTurns);
+      inflightStart = {
+        analysisId: idToStart,
+        maxTurns,
+        interviewModel: model,
+        promise,
+        startedAt: Date.now(),
+      };
+      // 持久化启动意图:整页刷新后通过 listInterviews 恢复
+      try {
+        sessionStorage.setItem(INTERVIEW_STARTING_KEY, JSON.stringify({
+          analysisId: idToStart,
+          maxTurns,
+          interviewModel: model,
+          savedAt: Date.now(),
+        }));
+      } catch {}
+      const r = await promise;
+      // 组件已卸载(用户切走了):不更新状态、不清除 inflight,供恢复使用
+      if (!mountedRef.current) return;
       if (!r.success || !r.state) {
         setError(r.error || "启动失败,请先在分析页生成报告");
         setPhase("idle");
@@ -91,10 +332,17 @@ function InterviewPage() {
       setPhase("answering");
       setTimeout(() => answerRef.current?.focus(), 100);
     } catch {
+      // 组件已卸载:保留 inflight(已 reject)供恢复时感知错误
+      if (!mountedRef.current) return;
       setError("请求失败,请检查后端服务");
       setPhase("idle");
     } finally {
-      setStarting(false);
+      // 仅在仍挂载时清理;卸载则保留 inflight 供恢复
+      if (mountedRef.current) {
+        setStarting(false);
+        inflightStart = null;
+        try { sessionStorage.removeItem(INTERVIEW_STARTING_KEY); } catch {}
+      }
     }
   }
 
@@ -208,19 +456,63 @@ function InterviewPage() {
     }
   }
 
+  // 请求停止:弹确认框
+  function requestStop() {
+    setShowStopConfirm(true);
+  }
+
+  // 确认停止:调用 abandon 接口,不生成报告,清空状态回到 StartView
+  async function confirmStopInterview() {
+    setShowStopConfirm(false);
+    const idToStop = state?.interview_id;
+    if (idToStop) {
+      try {
+        await api.abandonInterview(idToStop);
+      } catch {}
+    }
+    // 清空所有状态(包括启动中)
+    setState(null);
+    setReport(null);
+    setChat([]);
+    setAnswer("");
+    setError("");
+    setPhase("idle");
+    setInterviewModel("");
+    setStarting(false);
+    inflightStart = null;
+    try {
+      sessionStorage.removeItem(INTERVIEW_STATE_KEY);
+      sessionStorage.removeItem(INTERVIEW_STARTING_KEY);
+    } catch {}
+  }
+
+  // 取消停止:只关弹窗
+  function cancelStop() {
+    setShowStopConfirm(false);
+  }
+
   const started = state !== null;
 
   return (
     <div className="h-screen flex flex-col">
       {/* 右侧:对话区 / 启动区 / 报告区 */}
       <div className="flex-1 min-w-0 flex flex-col">
-        {!started && phase === "idle" ? (
+        {restoring ? (
+          // 恢复中:从 sessionStorage 读到数据,正在从后端拉最新 state
+          <div className="flex-1 flex items-center justify-center">
+            <div className="text-center">
+              <div className="w-8 h-8 rounded-full border-2 border-orange-200 border-t-orange-600 animate-spin mx-auto mb-3" />
+              <div className="text-[13px] text-stone-500">正在恢复面试…</div>
+            </div>
+          </div>
+        ) : !started && phase === "idle" ? (
           <StartView
-            presetSessionId={presetSessionId}
+            analysisId={analysisId}
+            setAnalysisId={setAnalysisId}
             starting={starting}
             maxTurns={maxTurns}
             setMaxTurns={setMaxTurns}
-            onStart={startWithSession}
+            onStart={startWithAnalysis}
             error={error}
           />
         ) : (
@@ -241,6 +533,7 @@ function InterviewPage() {
                   {phase === "finished" && (
                     <span className="badge badge-success">已完成</span>
                   )}
+                  {interviewModel && <ModelBadge variant="inline" model={interviewModel} />}
                 </div>
                 <div className="flex items-center gap-2">
                   <Link href="/history" className="btn btn-ghost text-[12px]">
@@ -251,6 +544,49 @@ function InterviewPage() {
                       提前结束
                     </button>
                   )}
+                  {phase !== "finished" && (
+                    <button
+                      onClick={requestStop}
+                      className="btn btn-ghost text-[12px]"
+                      style={{ color: "var(--danger)" }}
+                    >
+                      停止
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* 停止确认弹窗 */}
+            {showStopConfirm && (
+              <div
+                className="fixed inset-0 z-50 flex items-center justify-center"
+                style={{ background: "rgba(0,0,0,0.4)" }}
+                onClick={cancelStop}
+              >
+                <div
+                  className="max-w-[360px] w-full mx-4 rounded-xl p-5"
+                  style={{ background: "var(--bg-elevated)" }}
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <div className="text-[15px] font-semibold text-stone-800 mb-2">
+                    确认停止面试?
+                  </div>
+                  <div className="text-[12px] text-stone-500 leading-relaxed mb-4">
+                    停止后本次面试将被标记为「已放弃」,不生成最终报告,且无法恢复。如需报告请用「提前结束」。
+                  </div>
+                  <div className="flex justify-end gap-2">
+                    <button onClick={cancelStop} className="btn btn-ghost text-[12px]">
+                      取消
+                    </button>
+                    <button
+                      onClick={confirmStopInterview}
+                      className="btn text-[12px]"
+                      style={{ background: "var(--danger)", color: "#fff" }}
+                    >
+                      确认停止
+                    </button>
+                  </div>
                 </div>
               </div>
             )}
@@ -341,22 +677,22 @@ function InterviewPage() {
 
 // ── 启动视图 ──
 function StartView({
-  presetSessionId,
+  analysisId,
+  setAnalysisId,
   starting,
   maxTurns,
   setMaxTurns,
   onStart,
   error,
 }: {
-  presetSessionId: string;
+  analysisId: string;
+  setAnalysisId: (v: string) => void;
   starting: boolean;
   maxTurns: number;
   setMaxTurns: (n: number) => void;
-  onStart: (sessionId: string) => void;
+  onStart: (analysisId: string) => void;
   error: string;
 }) {
-  const [sessionId, setSessionId] = useState(presetSessionId);
-
   return (
     <div className="flex-1 flex items-center justify-center p-8">
       <div className="max-w-[480px] w-full">
@@ -382,12 +718,13 @@ function StartView({
 
         <div className="card p-5 space-y-4">
           <div>
-            <label className="label">分析会话 ID *</label>
+            <label className="label">分析记录 ID *</label>
             <input
               className="input"
-              value={sessionId}
-              onChange={(e) => setSessionId(e.target.value)}
-              placeholder="粘贴分析页生成的 session_id"
+              value={analysisId}
+              onChange={(e) => setAnalysisId(e.target.value)}
+              placeholder="粘贴分析页生成的 analysis_id"
+              disabled={starting}
             />
             <div className="text-[11px] text-stone-400 mt-1.5">
               在
@@ -398,7 +735,7 @@ function StartView({
           <div>
             <label className="label">面试轮数</label>
             <div className="flex items-center gap-2">
-              {[5, 8, 10, 12].map((n) => (
+              {[2, 3, 4].map((n) => (
                 <button
                   key={n}
                   onClick={() => setMaxTurns(n)}
@@ -412,6 +749,22 @@ function StartView({
                   {n}
                 </button>
               ))}
+              <input
+                type="number"
+                min={1}
+                max={9}
+                value={maxTurns}
+                onChange={(e) => {
+                  const v = parseInt(e.target.value, 10);
+                  if (isNaN(v)) return;
+                  // 限制在 1-9 之间
+                  setMaxTurns(Math.min(9, Math.max(1, v)));
+                }}
+                className="input flex-1 text-center"
+                style={{ width: 60, padding: "8px 6px", fontSize: 13 }}
+                title="自定义面试轮数(1-9)"
+              />
+              <span className="text-[11px] text-stone-400 shrink-0">轮</span>
             </div>
           </div>
           {error && (
@@ -423,13 +776,18 @@ function StartView({
             </div>
           )}
           <button
-            onClick={() => onStart(sessionId)}
-            disabled={!sessionId.trim() || starting}
+            onClick={() => onStart(analysisId)}
+            disabled={!analysisId.trim() || starting}
             className="btn btn-primary w-full"
             style={{ padding: "10px 16px", fontSize: 14 }}
           >
             {starting ? "启动中…" : "开始面试"}
           </button>
+        </div>
+
+        {/* 当前模型提示:启动面试后修改模型不影响本次面试 */}
+        <div className="flex justify-center mt-4">
+          <ModelBadge />
         </div>
       </div>
     </div>

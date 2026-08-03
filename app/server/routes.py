@@ -1,12 +1,14 @@
 """API 路由：分析、对话、会话、导出、模型配置、简历、模拟面试."""
 
+import json
 import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, UploadFile, File
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 
 from hiremind.models.schemas import InterviewResult, Position, ResumeData
 from hiremind.services import (
@@ -37,8 +39,9 @@ from .config import settings
 from .schemas import (
     AnalysisRequest,
     AnalysisResponse,
-    AnalysisHistoryItem,
-    AnalysisHistoryResponse,
+    AnalysisSummary,
+    AnalysisListResponse,
+    AnalysisDetailResponse,
     ExportRequest,
     ExportResponse,
     HealthResponse,
@@ -56,9 +59,6 @@ from .schemas import (
     ResumeExportRequest,
     ResumeListResponse,
     ResumeParseRequest,
-    SessionDetailResponse,
-    SessionListResponse,
-    SessionSummary,
 )
 
 router = APIRouter()
@@ -171,100 +171,103 @@ async def parse_document_api(file: UploadFile = File(...)):
 
 @router.post("/analysis/run", response_model=AnalysisResponse, tags=["Analysis"])
 def run_analysis(req: AnalysisRequest):
-    """直接执行完整分析.
+    """启动异步分析任务,立即返回 analysis_id.
 
+    分析在后台线程执行,完成后结果落盘到 analyses/ 目录。
+    前端通过 GET /analysis/history/{analysis_id} 轮询结果。
     company_name 与 job_title 可选,留空时使用占位符。
-    每次分析创建独立 session,避免覆盖历史记录。
     """
+    from hiremind import AnalysisStore, RunStore, HireMindAgent
+    from hiremind.analysis_store import new_analysis
+
     try:
-        agent = get_agent()
-        # 重置 session：每次分析是独立会话,否则单例 agent 会复用同一 session,
-        # 后续分析覆盖前一次的 interview_result,历史记录只剩最新一条
-        agent.reset()
-        # 兜底:空字符串转占位符,避免下游 prompt 出现"该公司"等空洞表述
+        ws = get_workspace()
+        ws.ensure_dirs()
+        analysis_store = AnalysisStore(ws.analyses_dir)
+
+        # 创建独立 analysis 记录并立即落盘(status=pending)
         company_name = (req.company_name or "").strip() or "未指定公司"
         job_title = (req.job_title or "").strip() or "未指定岗位"
-        agent.run_full_analysis(
-            company_name=company_name,
-            company_business_scope=req.company_business_scope or "",
-            job_title=job_title,
-            job_requirements=req.job_requirements,
-            resume=req.resume,
+        # 记录启动时使用的模型,供前端显示(分析启动后改模型不影响本次)
+        analysis = new_analysis(
+            title=f"{company_name}-{job_title}",
+            model=settings.model_name,
         )
-        result_data = agent.session.get("interview_result")
+        analysis_store.save(analysis)
+        analysis_id = analysis["id"]
+        analysis_model = analysis["model"]
+
+        # 捕获请求参数,供后台线程使用
+        params = {
+            "company_name": company_name,
+            "company_business_scope": req.company_business_scope or "",
+            "job_title": job_title,
+            "job_requirements": req.job_requirements,
+            "resume": req.resume,
+        }
+
+        def _run_in_background():
+            """后台线程:创建独立 agent 流式执行分析,每完成一个节点写入 progress."""
+            try:
+                from hiremind.services.llm_service import get_llm as _get_llm
+                from hiremind.tools import run_analysis_with_progress
+
+                llm = _get_llm(
+                    model=settings.model_name,
+                    api_key=settings.openai_api_key or settings.anthropic_api_key,
+                    base_url=settings.openai_base_url,
+                )
+                agent = HireMindAgent.from_analysis(
+                    model_client=llm,
+                    workspace=ws,
+                    analysis_store=analysis_store,
+                    run_store=RunStore(ws.runs_dir),
+                    analysis_id=analysis_id,
+                )
+
+                # 进度回调:每完成一个节点,把进度写入 analysis 文件供 SSE 读取
+                completed_nodes = []
+
+                def _on_progress(node_name: str, label: str):
+                    completed_nodes.append({"node": node_name, "label": label})
+                    a = analysis_store.load(analysis_id)
+                    if a is not None:
+                        a["progress"] = {
+                            "completed": list(completed_nodes),
+                            "current": label if node_name != "done" else None,
+                        }
+                        analysis_store.save(a)
+
+                run_analysis_with_progress(agent, params, on_progress=_on_progress)
+            except Exception as exc:
+                # 记录错误到 analysis,供轮询时读取
+                a = analysis_store.load(analysis_id)
+                if a is not None:
+                    a["status"] = "error"
+                    a["error"] = str(exc)
+                    analysis_store.save(a)
+
+        thread = threading.Thread(target=_run_in_background, daemon=True)
+        thread.start()
+
         return AnalysisResponse(
             success=True,
-            result=result_data,
-            session_id=agent.session["id"],
+            result=None,
+            analysis_id=analysis_id,
+            model=analysis_model,
         )
     except Exception as exc:
         return AnalysisResponse(
             success=False,
-            session_id="",
+            analysis_id="",
             error=str(exc),
         )
 
 
 # ── 历史记录 ──
-
-@router.get("/analysis/history", response_model=AnalysisHistoryResponse, tags=["Analysis"])
-async def list_analysis_history():
-    """列出所有生成过分析报告的会话摘要.
-
-    遍历 sessions 目录,过滤出 interview_result 非空的会话,
-    返回 session_id / title / company_name / job_title / match_score / rounds_count / 时间戳。
-    """
-    from hiremind import SessionStore
-    ws = get_workspace()
-    store = SessionStore(ws.sessions_dir)
-    items: list[AnalysisHistoryItem] = []
-    for path in sorted(ws.sessions_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
-        try:
-            import json as _json
-            data = _json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        result = data.get("interview_result")
-        if not result:
-            continue
-        try:
-            ma = result.get("match_analysis", {}) or {}
-            rounds = (result.get("questions", {}) or {}).get("rounds", []) or []
-            items.append(AnalysisHistoryItem(
-                session_id=data.get("id", path.stem),
-                title=data.get("title", "") or "",
-                company_name=result.get("company_name", "") or "",
-                job_title=result.get("job_title", "") or "",
-                match_score=int(ma.get("match_score", 0) or 0),
-                rounds_count=len(rounds),
-                created_at=data.get("created_at", "") or "",
-                updated_at=data.get("updated_at", "") or "",
-            ))
-        except Exception:
-            continue
-    return AnalysisHistoryResponse(items=items)
-
-
-@router.get("/analysis/history/{session_id}", tags=["Analysis"])
-async def get_analysis_history_detail(session_id: str):
-    """读取指定会话的完整分析报告."""
-    from hiremind import SessionStore
-    ws = get_workspace()
-    store = SessionStore(ws.sessions_dir)
-    session = store.load(session_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
-    result = session.get("interview_result")
-    if not result:
-        raise HTTPException(status_code=404, detail="该会话无分析报告")
-    return {
-        "success": True,
-        "session_id": session_id,
-        "title": session.get("title", ""),
-        "created_at": session.get("created_at", ""),
-        "updated_at": session.get("updated_at", ""),
-        "result": result,
-    }
+# 注:/analysis/history 与 /analysis/history/{id} 已合并到 /analyses 与 /analyses/{id},
+# 列表项现在包含 status/company_name/job_title/match_score/rounds_count,
+# 详情现在返回 status + result,前端统一用 listAnalyses/getAnalysis。
 
 
 @router.get("/interview/{interview_id}/report", tags=["Interview"])
@@ -293,37 +296,169 @@ def get_interview_report(interview_id: str):
     }
 
 
-# ── 会话管理 ──
+# ── 分析记录管理 ──
 
-@router.get("/sessions", response_model=SessionListResponse, tags=["Sessions"])
-async def list_sessions():
-    from hiremind import SessionStore
+@router.get("/analyses", response_model=AnalysisListResponse, tags=["Analysis"])
+async def list_analyses():
+    """列出所有分析记录摘要(含业务字段与状态)."""
+    import json as _json
+    from hiremind import AnalysisStore
     ws = get_workspace()
-    store = SessionStore(ws.sessions_dir)
-    sessions = store.list_all()
-    return SessionListResponse(sessions=[SessionSummary(**s) for s in sessions])
+    store = AnalysisStore(ws.analyses_dir)
+    analyses: list[AnalysisSummary] = []
+    for path in sorted(ws.analyses_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+        try:
+            data = _json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        result = data.get("interview_result") or {}
+        ma = result.get("match_analysis", {}) or {}
+        rounds = (result.get("questions", {}) or {}).get("rounds", []) or []
+        analyses.append(AnalysisSummary(
+            id=data.get("id", path.stem),
+            title=data.get("title", "") or "",
+            status=data.get("status", "completed"),
+            company_name=result.get("company_name", "") or "",
+            job_title=result.get("job_title", "") or "",
+            match_score=int(ma.get("match_score", 0) or 0),
+            rounds_count=len(rounds),
+            message_count=len(data.get("history", [])),
+            created_at=data.get("created_at", "") or "",
+            updated_at=data.get("updated_at", "") or "",
+            metadata=data.get("metadata", {}) or {},
+        ))
+    return AnalysisListResponse(analyses=analyses)
 
 
-@router.get("/sessions/{session_id}", response_model=SessionDetailResponse, tags=["Sessions"])
-async def get_session(session_id: str):
-    from hiremind import SessionStore
+@router.get("/analyses/{analysis_id}", response_model=AnalysisDetailResponse, tags=["Analysis"])
+async def get_analysis(analysis_id: str):
+    """读取单条分析的状态与完整报告.
+
+    返回 status 字段:pending(进行中) / completed(已完成) / error(失败)。
+    status=pending 或 error 时不返回 result。
+    """
+    from hiremind import AnalysisStore
     ws = get_workspace()
-    store = SessionStore(ws.sessions_dir)
-    session = store.load(session_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
-    return SessionDetailResponse(session=session)
+    store = AnalysisStore(ws.analyses_dir)
+    analysis = store.load(analysis_id)
+    if not analysis:
+        raise HTTPException(status_code=404, detail="Analysis not found")
+    status = analysis.get("status", "completed")
+    result = analysis.get("interview_result")
+    return AnalysisDetailResponse(
+        analysis_id=analysis_id,
+        title=analysis.get("title", "") or "",
+        status=status,
+        created_at=analysis.get("created_at", "") or "",
+        updated_at=analysis.get("updated_at", "") or "",
+        result=result if status == "completed" and result else None,
+        error=analysis.get("error") if status == "error" else None,
+        model=analysis.get("model", "") or "",
+    )
 
 
-@router.delete("/sessions/{session_id}", tags=["Sessions"])
-async def delete_session(session_id: str):
-    from hiremind import SessionStore
+@router.delete("/analyses/{analysis_id}", tags=["Analysis"])
+async def delete_analysis(analysis_id: str):
+    """删除指定分析记录."""
+    from hiremind import AnalysisStore
     ws = get_workspace()
-    store = SessionStore(ws.sessions_dir)
-    deleted = store.delete(session_id)
+    store = AnalysisStore(ws.analyses_dir)
+    deleted = store.delete(analysis_id)
     if not deleted:
-        raise HTTPException(status_code=404, detail="Session not found")
+        raise HTTPException(status_code=404, detail="Analysis not found")
     return {"success": True}
+
+
+@router.post("/analyses/{analysis_id}/cancel", tags=["Analysis"])
+async def cancel_analysis(analysis_id: str):
+    """取消分析任务:把 status 置为 cancelled.
+
+    后台线程仍在执行时无法真正中断 LangGraph,但状态标记为 cancelled 后,
+    前端列表会显示"已取消",SSE 也会推送 cancelled 状态并停止。
+    """
+    from hiremind import AnalysisStore
+    ws = get_workspace()
+    store = AnalysisStore(ws.analyses_dir)
+    analysis = store.load(analysis_id)
+    if not analysis:
+        raise HTTPException(status_code=404, detail="Analysis not found")
+    if analysis.get("status") in ("completed", "error", "cancelled"):
+        return {"success": True, "status": analysis.get("status")}
+    analysis["status"] = "cancelled"
+    analysis["error"] = "用户已取消"
+    store.save(analysis)
+    return {"success": True, "status": "cancelled"}
+
+
+@router.get("/analysis/stream/{analysis_id}", tags=["Analysis"])
+async def stream_analysis_progress(analysis_id: str):
+    """SSE 接口:实时推送分析进度.
+
+    后台线程在执行 LangGraph 节点时会更新 analysis 文件的 progress 字段,
+    本接口每秒轮询该字段,变化时推送 SSE 事件。
+    当 status 变为 completed / error 时,推送最终事件后关闭流。
+    """
+    import asyncio
+    from hiremind import AnalysisStore
+
+    ws = get_workspace()
+    store = AnalysisStore(ws.analyses_dir)
+
+    async def event_generator():
+        last_progress = None
+        last_status = None
+        # 最长保活 10 分钟,防止前端断开后连接悬挂
+        max_ticks = 600
+        for _ in range(max_ticks):
+            analysis = store.load(analysis_id)
+            if not analysis:
+                yield f"data: {json.dumps({'error': 'Analysis not found'})}\n\n"
+                return
+            status = analysis.get("status", "pending")
+            progress = analysis.get("progress") or {}
+            # 终态:completed / error / cancelled
+            is_terminal = status in ("completed", "error", "cancelled")
+            # 进度变化时推送
+            if progress != last_progress:
+                payload = {
+                    "status": status,
+                    "progress": progress,
+                }
+                # 完成时附带最终结果
+                if status == "completed":
+                    payload["result"] = analysis.get("interview_result")
+                # 出错或取消时附带错误信息
+                elif status in ("error", "cancelled"):
+                    payload["error"] = analysis.get("error") or ("已取消" if status == "cancelled" else "分析失败")
+                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                last_progress = progress
+                last_status = status
+                if is_terminal:
+                    return
+            # 即使进度没变,状态变化也要推送
+            elif status != last_status:
+                payload = {"status": status}
+                if status == "completed":
+                    payload["result"] = analysis.get("interview_result")
+                elif status in ("error", "cancelled"):
+                    payload["error"] = analysis.get("error") or ("已取消" if status == "cancelled" else "分析失败")
+                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                last_status = status
+                if is_terminal:
+                    return
+            await asyncio.sleep(1)
+        # 超时
+        yield f"data: {json.dumps({'error': 'Stream timeout'})}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",  # 禁用 nginx 缓冲
+            "Connection": "keep-alive",
+        },
+    )
 
 
 # ── 报告导出(分析报告)──
@@ -332,7 +467,17 @@ async def delete_session(session_id: str):
 def export_report(req: ExportRequest):
     try:
         agent = get_agent()
-        result_data = agent.session.get("interview_result")
+        # 优先按 analysis_id 加载历史分析,否则用 agent 当前分析
+        if req.analysis_id:
+            from hiremind import AnalysisStore
+            ws = get_workspace()
+            store = AnalysisStore(ws.analyses_dir)
+            analysis = store.load(req.analysis_id)
+            if not analysis:
+                return ExportResponse(success=False, error="分析记录不存在")
+            result_data = analysis.get("interview_result")
+        else:
+            result_data = agent.analysis.get("interview_result")
         if not result_data:
             return ExportResponse(success=False, error="尚未进行过分析")
         result = InterviewResult.model_validate(result_data)
@@ -673,26 +818,26 @@ def _serialize_interview_state(iv: MockInterview) -> dict:
 
 @router.post("/interview/start", tags=["Interview"])
 def start_interview(req: InterviewStartRequest):
-    """启动一场模拟面试,基于指定 session 的分析结果."""
+    """启动一场模拟面试,基于指定分析的分析结果."""
     try:
         agent = get_agent()
-        # 恢复指定 session
-        if req.session_id and req.session_id != agent.session.get("id"):
-            from hiremind import HireMindAgent, SessionStore, RunStore
+        # 恢复指定分析
+        if req.analysis_id and req.analysis_id != agent.analysis.get("id"):
+            from hiremind import HireMindAgent, AnalysisStore, RunStore
             ws = get_workspace()
-            agent = HireMindAgent.from_session(
+            agent = HireMindAgent.from_analysis(
                 model_client=agent.model_client,
                 workspace=ws,
-                session_store=SessionStore(ws.sessions_dir),
+                analysis_store=AnalysisStore(ws.analyses_dir),
                 run_store=RunStore(ws.runs_dir),
-                session_id=req.session_id,
+                analysis_id=req.analysis_id,
             )
-        result_data = agent.session.get("interview_result")
+        result_data = agent.analysis.get("interview_result")
         if not result_data:
-            return {"success": False, "error": "该会话尚未生成分析报告,请先在分析页生成报告"}
+            return {"success": False, "error": "该分析尚未生成报告,请先在分析页生成报告"}
         result = InterviewResult.model_validate(result_data)
         iv = new_interview(
-            session_id=agent.session["id"],
+            analysis_id=agent.analysis["id"],
             result=result,
             resume_text="",
             max_turns=req.max_turns,
@@ -776,6 +921,26 @@ def finish_interview(interview_id: str):
         }
     except Exception as exc:
         return {"success": False, "error": str(exc)}
+
+
+@router.post("/interview/{interview_id}/abandon", tags=["Interview"])
+def abandon_interview(interview_id: str):
+    """放弃面试:把 status 置为 abandoned,不生成报告.
+
+    与 finish 的区别:finish 会调用 LLM 生成最终报告(耗时),
+    abandon 直接标记状态并保存,适合用户中途退出不想要报告的场景。
+    已 finished/abandoned 的面试不可重复放弃。
+    """
+    store = get_interview_store()
+    agent = get_agent()
+    iv = store.load(interview_id, model_client=agent.model_client)
+    if not iv:
+        raise HTTPException(status_code=404, detail="Interview not found")
+    if iv.status in ("finished", "abandoned"):
+        return {"success": True, "status": iv.status}
+    iv.status = "abandoned"
+    store.save(iv)
+    return {"success": True, "status": "abandoned"}
 
 
 @router.get("/interview/{interview_id}/state", tags=["Interview"])

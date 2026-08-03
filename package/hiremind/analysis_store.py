@@ -1,4 +1,4 @@
-"""SessionStore：跨轮可恢复会话的磁盘仓储."""
+"""AnalysisStore：分析的磁盘仓储."""
 
 from __future__ import annotations
 
@@ -14,20 +14,20 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-class SessionStore:
-    """会话磁盘仓储.
+class AnalysisStore:
+    """分析磁盘仓储.
 
-    把整个 session 序列化为 .hiremind/sessions/<id>.json，
-    支持崩溃恢复和继续对话。
+    把每份分析序列化为 .hiremind/analyses/<id>.json，
+    支持崩溃恢复和历史加载。
     """
 
     def __init__(self, root: Path):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
 
-    def path(self, session_id: str) -> Path:
-        """获取 session 文件路径."""
-        return self.root / f"{session_id}.json"
+    def path(self, analysis_id: str) -> Path:
+        """获取分析文件路径."""
+        return self.root / f"{analysis_id}.json"
 
     def _write_atomic(self, path: Path, data: dict) -> Path:
         """原子写：先写 tmp 再 replace，避免半截 JSON."""
@@ -40,33 +40,33 @@ class SessionStore:
         tmp_path.replace(path)
         return path
 
-    def save(self, session: Dict[str, Any]) -> Path:
-        """保存 session 到磁盘."""
-        session_id = session.get("id", "")
-        if not session_id:
-            session_id = f"session-{uuid4().hex[:12]}"
-            session["id"] = session_id
-        session["updated_at"] = _now()
-        return self._write_atomic(self.path(session_id), session)
+    def save(self, analysis: Dict[str, Any]) -> Path:
+        """保存分析到磁盘."""
+        analysis_id = analysis.get("id", "")
+        if not analysis_id:
+            analysis_id = f"analysis-{uuid4().hex[:12]}"
+            analysis["id"] = analysis_id
+        analysis["updated_at"] = _now()
+        return self._write_atomic(self.path(analysis_id), analysis)
 
-    def load(self, session_id: str) -> Optional[Dict[str, Any]]:
-        """从磁盘加载 session."""
-        path = self.path(session_id)
+    def load(self, analysis_id: str) -> Optional[Dict[str, Any]]:
+        """从磁盘加载分析."""
+        path = self.path(analysis_id)
         if not path.exists():
             return None
         with open(path, encoding="utf-8") as f:
             return json.load(f)
 
     def latest(self) -> Optional[str]:
-        """按修改时间取最新的 session ID."""
-        sessions = list(self.root.glob("*.json"))
-        if not sessions:
+        """按修改时间取最新的分析 ID."""
+        analyses = list(self.root.glob("*.json"))
+        if not analyses:
             return None
-        latest_file = max(sessions, key=lambda p: p.stat().st_mtime)
+        latest_file = max(analyses, key=lambda p: p.stat().st_mtime)
         return latest_file.stem
 
     def list_all(self) -> List[Dict[str, Any]]:
-        """列出所有 session 摘要（不含完整 history）."""
+        """列出所有分析摘要（不含完整 history）."""
         result = []
         for path in sorted(self.root.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
             try:
@@ -84,24 +84,31 @@ class SessionStore:
                 continue
         return result
 
-    def delete(self, session_id: str) -> bool:
-        """删除指定 session."""
-        path = self.path(session_id)
+    def delete(self, analysis_id: str) -> bool:
+        """删除指定分析."""
+        path = self.path(analysis_id)
         if path.exists():
             path.unlink()
             return True
         return False
 
 
-def new_session(title: str = "", metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """创建一个新的 session 字典."""
+def new_analysis(title: str = "", metadata: Optional[Dict[str, Any]] = None, model: str = "") -> Dict[str, Any]:
+    """创建一份新的分析字典.
+
+    model: 启动本次分析时后端使用的模型名称,用于前端显示"本次分析使用的模型",
+    避免分析启动后用户修改全局模型配置导致显示与实际不一致。
+    """
     return {
-        "id": f"session-{uuid4().hex[:12]}",
+        "id": f"analysis-{uuid4().hex[:12]}",
         "created_at": _now(),
         "updated_at": _now(),
         "title": title,
         "history": [],
         "memory": {},
         "interview_result": None,
+        "status": "pending",
+        "error": None,
         "metadata": metadata or {},
+        "model": model or "",
     }

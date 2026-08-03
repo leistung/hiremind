@@ -16,7 +16,6 @@ openapi_tags = [
     {"name": "Documents", "description": "PDF / Word 文档解析为纯文本"},
     {"name": "Analysis", "description": "面试分析:执行分析与历史报告查询"},
     {"name": "Interview", "description": "模拟面试:启动、答题、出题、结束与报告"},
-    {"name": "Sessions", "description": "会话管理:列表、详情、删除"},
     {"name": "Export", "description": "分析报告导出为 Word / PDF 并下载"},
 ]
 

@@ -105,7 +105,7 @@ class PositionListResponse(BaseModel):
 class InterviewStartRequest(BaseModel):
     """启动模拟面试."""
 
-    session_id: str = ""
+    analysis_id: str = ""
     max_turns: int = 8
 
 
@@ -121,21 +121,9 @@ class InterviewListResponse(BaseModel):
 
 # ── 历史记录 ──
 
-class AnalysisHistoryItem(BaseModel):
-    """面试分析历史项."""
-
-    session_id: str
-    title: str = ""
-    company_name: str = ""
-    job_title: str = ""
-    match_score: int = 0
-    rounds_count: int = 0
-    created_at: str = ""
-    updated_at: str = ""
-
-
 class AnalysisHistoryResponse(BaseModel):
-    items: List[AnalysisHistoryItem]
+    """已废弃:旧版历史列表响应,保留供导出模块兼容."""
+    items: List[Dict[str, Any]]
 
 
 # ── 响应模型 ──
@@ -143,30 +131,48 @@ class AnalysisHistoryResponse(BaseModel):
 class AnalysisResponse(BaseModel):
     success: bool
     result: Optional[Dict[str, Any]] = None
-    session_id: str
+    analysis_id: str
     error: Optional[str] = None
+    model: str = ""
 
 
-class SessionSummary(BaseModel):
+class AnalysisSummary(BaseModel):
+    """分析列表摘要:含通用元信息与业务字段."""
+
     id: str
     title: str = ""
+    status: str = "completed"
+    company_name: str = ""
+    job_title: str = ""
+    match_score: int = 0
+    rounds_count: int = 0
+    message_count: int = 0
     created_at: str = ""
     updated_at: str = ""
-    message_count: int = 0
     metadata: Dict[str, Any] = {}
 
 
-class SessionListResponse(BaseModel):
-    sessions: List[SessionSummary]
+class AnalysisListResponse(BaseModel):
+    analyses: List[AnalysisSummary]
 
 
-class SessionDetailResponse(BaseModel):
-    session: Dict[str, Any]
+class AnalysisDetailResponse(BaseModel):
+    """单条分析详情:含 status 与完整 interview_result."""
+
+    success: bool = True
+    analysis_id: str
+    title: str = ""
+    status: str = "completed"
+    created_at: str = ""
+    updated_at: str = ""
+    result: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+    model: str = ""
 
 
 class ExportRequest(BaseModel):
     format: str  # word / pdf
-    session_id: Optional[str] = None
+    analysis_id: Optional[str] = None
 
 
 class ExportResponse(BaseModel):

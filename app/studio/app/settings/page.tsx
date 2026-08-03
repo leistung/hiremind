@@ -246,6 +246,8 @@ export default function SettingsPage() {
       });
       setToast("配置已保存并持久化");
       await refreshFromBackend();
+      // 通知其他组件(Sidebar)刷新模型显示
+      window.dispatchEvent(new Event("hiremind:model-changed"));
     } catch {
       setError("保存失败");
     } finally {

@@ -6,8 +6,8 @@ import { api } from "@/lib/api";
 import { formatDate, relativeTime, scoreColor } from "@/lib/utils";
 import FullscreenPreview, { FullscreenButton } from "@/components/FullscreenPreview";
 import type {
-  AnalysisHistoryDetail,
-  AnalysisHistoryItem,
+  AnalysisDetail,
+  AnalysisSummary,
   InterviewListItem,
   InterviewReportDetail,
   InterviewResult,
@@ -22,9 +22,9 @@ export default function HistoryPage() {
   const [tab, setTab] = useState<Tab>("analysis");
 
   // 分析历史
-  const [analysisItems, setAnalysisItems] = useState<AnalysisHistoryItem[]>([]);
+  const [analysisItems, setAnalysisItems] = useState<AnalysisSummary[]>([]);
   const [selectedAnalysisId, setSelectedAnalysisId] = useState("");
-  const [analysisDetail, setAnalysisDetail] = useState<AnalysisHistoryDetail | null>(null);
+  const [analysisDetail, setAnalysisDetail] = useState<AnalysisDetail | null>(null);
   const [loadingAnalysis, setLoadingAnalysis] = useState(false);
 
   // 面试历史
@@ -39,8 +39,8 @@ export default function HistoryPage() {
   useEffect(() => {
     if (tab === "analysis") {
       setLoadingList(true);
-      api.listAnalysisHistory()
-        .then((r) => setAnalysisItems(r.items || []))
+      api.listAnalyses()
+        .then((r) => setAnalysisItems(r.analyses || []))
         .catch(() => setAnalysisItems([]))
         .finally(() => setLoadingList(false));
     } else {
@@ -59,7 +59,7 @@ export default function HistoryPage() {
       return;
     }
     setLoadingAnalysis(true);
-    api.getAnalysisHistoryDetail(selectedAnalysisId)
+    api.getAnalysis(selectedAnalysisId)
       .then((r) => setAnalysisDetail(r))
       .catch(() => setAnalysisDetail(null))
       .finally(() => setLoadingAnalysis(false));
@@ -133,10 +133,10 @@ export default function HistoryPage() {
               ) : (
                 analysisItems.map((it) => (
                   <AnalysisListCard
-                    key={it.session_id}
+                    key={it.id}
                     item={it}
-                    active={selectedAnalysisId === it.session_id}
-                    onClick={() => setSelectedAnalysisId(it.session_id)}
+                    active={selectedAnalysisId === it.id}
+                    onClick={() => setSelectedAnalysisId(it.id)}
                   />
                 ))
               )
@@ -162,7 +162,15 @@ export default function HistoryPage() {
               loadingAnalysis ? (
                 <CenterSpinner text="加载报告中…" />
               ) : analysisDetail ? (
-                <AnalysisReportView detail={analysisDetail} />
+                analysisDetail.result ? (
+                  <AnalysisReportView detail={analysisDetail} />
+                ) : analysisDetail.status === "error" ? (
+                  <CenterHint text={analysisDetail.error || "分析失败"} />
+                ) : analysisDetail.status === "cancelled" ? (
+                  <CenterHint text={analysisDetail.error || "该分析已被取消"} />
+                ) : (
+                  <CenterSpinner text="分析进行中…" />
+                )
               ) : (
                 <CenterHint text="加载失败,请重试" />
               )
@@ -287,7 +295,7 @@ function AnalysisListCard({
   active,
   onClick,
 }: {
-  item: AnalysisHistoryItem;
+  item: AnalysisSummary;
   active: boolean;
   onClick: () => void;
 }) {
@@ -295,6 +303,9 @@ function AnalysisListCard({
   const sc = scoreColor(score);
   const scColor =
     sc === "success" ? "var(--success)" : sc === "warning" ? "var(--warning)" : "var(--danger)";
+  const isPending = item.status === "pending";
+  const isError = item.status === "error";
+  const isCancelled = item.status === "cancelled";
 
   return (
     <button
@@ -308,19 +319,40 @@ function AnalysisListCard({
       <div className="flex items-start gap-3">
         <div
           className="w-10 h-10 rounded-lg shrink-0 flex flex-col items-center justify-center"
-          style={{ background: "var(--bg-muted)", color: scColor }}
+          style={{ background: "var(--bg-muted)", color: isError ? "var(--danger)" : scColor }}
         >
-          <span className="text-[14px] font-bold leading-none">{score}</span>
-          <span className="text-[8px] mt-0.5 opacity-70">分</span>
+          {isPending ? (
+            <span className="text-[9px] font-medium">进行中</span>
+          ) : isError ? (
+            <span className="text-[9px] font-medium">失败</span>
+          ) : isCancelled ? (
+            <span className="text-[9px] font-medium">已取消</span>
+          ) : (
+            <>
+              <span className="text-[14px] font-bold leading-none">{score}</span>
+              <span className="text-[8px] mt-0.5 opacity-70">分</span>
+            </>
+          )}
         </div>
         <div className="flex-1 min-w-0">
           <div className="text-[13px] font-medium text-stone-800 truncate">
-            {item.company_name || "未指定公司"} · {item.job_title || "未指定岗位"}
+            {item.company_name || item.title || "未指定公司"} · {item.job_title || "未指定岗位"}
           </div>
           <div className="text-[11px] text-stone-400 mt-0.5 flex items-center gap-2">
-            <span>{item.rounds_count} 轮题</span>
+            {isPending ? (
+              <span>分析进行中…</span>
+            ) : (
+              <span>{item.rounds_count} 轮题</span>
+            )}
             <span>·</span>
             <span>{relativeTime(item.created_at)}</span>
+          </div>
+          {/* analysis_id:供复制粘贴到模拟面试页 */}
+          <div
+            className="text-[10px] mt-1 font-mono text-stone-400 truncate select-all"
+            title={`分析 ID:${item.id}(可复制粘贴到模拟面试页)`}
+          >
+            {item.id}
           </div>
         </div>
       </div>
@@ -340,6 +372,7 @@ function InterviewListCard({
   onClick: () => void;
 }) {
   const finished = item.status === "finished";
+  const abandoned = item.status === "abandoned";
   const score = item.overall_score || 0;
   const sc = scoreColor(score);
   const scColor =
@@ -367,6 +400,8 @@ function InterviewListCard({
               <span className="text-[14px] font-bold leading-none">{score}</span>
               <span className="text-[8px] mt-0.5 opacity-70">分</span>
             </>
+          ) : abandoned ? (
+            <span className="text-[9px] font-medium" style={{ color: "var(--fg-muted)" }}>已放弃</span>
           ) : (
             <span className="text-[10px] font-semibold">进行中</span>
           )}
@@ -388,9 +423,9 @@ function InterviewListCard({
 
 // ── 分析报告详情 ──
 
-function AnalysisReportView({ detail }: { detail: AnalysisHistoryDetail }) {
+function AnalysisReportView({ detail }: { detail: AnalysisDetail }) {
   const [fullscreen, setFullscreen] = useState(false);
-  const result: InterviewResult = detail.result;
+  const result: InterviewResult = detail.result!;
   const title = `${result.company_name || "未指定公司"} · ${result.job_title || "未指定岗位"}`;
   const subtitle = `面试分析报告 · 生成于 ${formatDate(detail.created_at)}`;
 
@@ -410,7 +445,7 @@ function AnalysisReportView({ detail }: { detail: AnalysisHistoryDetail }) {
           <div className="flex items-center gap-2">
             <FullscreenButton onClick={() => setFullscreen(true)} />
             <Link
-              href={`/interview?session=${detail.session_id}`}
+              href={`/interview?analysis=${detail.analysis_id}`}
               className="btn btn-primary"
             >
               基于此报告模拟面试 →
@@ -731,8 +766,10 @@ function InterviewReportView({ detail }: { detail: InterviewReportDetail }) {
   const [fullscreen, setFullscreen] = useState(false);
   const report = detail.report;
   const finished = detail.status === "finished" && !!report;
+  const abandoned = detail.status === "abandoned";
+  const statusText = finished ? "已完成" : abandoned ? "已放弃" : "进行中";
   const title = `${detail.company_name || "未指定公司"} · ${detail.job_title || "未指定岗位"}`;
-  const subtitle = `模拟面试记录 · ${detail.turns.length} 轮问答 · ${finished ? "已完成" : "进行中"}${report?.created_at ? ` · ${formatDate(report.created_at)}` : ""}`;
+  const subtitle = `模拟面试记录 · ${detail.turns.length} 轮问答 · ${statusText}${report?.created_at ? ` · ${formatDate(report.created_at)}` : ""}`;
 
   return (
     <>
@@ -744,8 +781,7 @@ function InterviewReportView({ detail }: { detail: InterviewReportDetail }) {
               {detail.company_name || "未指定公司"} · {detail.job_title || "未指定岗位"}
             </h1>
             <div className="text-[12px] text-stone-400">
-              模拟面试记录 · {detail.turns.length} 轮问答 ·{" "}
-              {finished ? "已完成" : "进行中"}
+              模拟面试记录 · {detail.turns.length} 轮问答 · {statusText}
               {report?.created_at && ` · ${formatDate(report.created_at)}`}
             </div>
           </div>
@@ -773,6 +809,7 @@ function InterviewReportView({ detail }: { detail: InterviewReportDetail }) {
 function InterviewReportBody({ detail }: { detail: InterviewReportDetail }) {
   const report = detail.report;
   const finished = detail.status === "finished" && !!report;
+  const abandoned = detail.status === "abandoned";
   const score = report?.overall_score || 0;
   const sc = scoreColor(score);
   const scColor =
@@ -783,15 +820,25 @@ function InterviewReportBody({ detail }: { detail: InterviewReportDetail }) {
       {!finished ? (
         <div
           className="card p-6 mb-6 text-center"
-          style={{ background: "var(--accent-bg)", color: "var(--accent)" }}
+          style={
+            abandoned
+              ? { background: "var(--bg-muted)", color: "var(--fg-muted)" }
+              : { background: "var(--accent-bg)", color: "var(--accent)" }
+          }
         >
-          <div className="text-[14px] font-semibold mb-1">该面试尚未完成</div>
-          <div className="text-[12px] opacity-80">
-            已进行 {detail.turns.length} 轮,可前往面试页继续或结束生成报告
+          <div className="text-[14px] font-semibold mb-1">
+            {abandoned ? "该面试已放弃" : "该面试尚未完成"}
           </div>
-          <Link href="/interview" className="btn btn-primary mt-3 inline-block">
-            去继续面试 →
-          </Link>
+          <div className="text-[12px] opacity-80">
+            {abandoned
+              ? `已进行 ${detail.turns.length} 轮后放弃,未生成最终报告`
+              : `已进行 ${detail.turns.length} 轮,可前往面试页继续或结束生成报告`}
+          </div>
+          {!abandoned && (
+            <Link href="/interview" className="btn btn-primary mt-3 inline-block">
+              去继续面试 →
+            </Link>
+          )}
         </div>
       ) : (
         <>

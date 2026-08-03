@@ -19,7 +19,7 @@ from .context_manager import InterviewContextManager
 from .graph.interview_graph import InterviewGraph
 from .memory import HireMindMemory
 from .run_store import RunStore
-from .session_store import SessionStore, new_session
+from .analysis_store import AnalysisStore, new_analysis
 from .task_state import TaskState
 from .tools import TOOL_SPECS, build_tool_registry, validate_tool
 from .workspace import HireMindWorkspace
@@ -49,15 +49,15 @@ class HireMindAgent:
         self,
         model_client: BaseChatModel,
         workspace: HireMindWorkspace,
-        session_store: SessionStore,
+        analysis_store: AnalysisStore,
         run_store: RunStore,
         max_steps: int = MAX_STEPS_DEFAULT,
         max_retries: int = MAX_RETRIES_DEFAULT,
-        session: Optional[Dict[str, Any]] = None,
+        analysis: Optional[Dict[str, Any]] = None,
     ):
         self.model_client = model_client
         self.workspace = workspace
-        self.session_store = session_store
+        self.analysis_store = analysis_store
         self.run_store = run_store
         self.max_steps = max_steps
         self.max_retries = max_retries
@@ -69,15 +69,15 @@ class HireMindAgent:
         self.tools_spec = TOOL_SPECS
         self.tools = build_tool_registry(self)
 
-        # 恢复或新建 session
-        if session:
-            self.session = session
+        # 恢复或新建 analysis
+        if analysis:
+            self.analysis = analysis
             # 恢复工作记忆
-            mem_state = session.get("memory", {})
+            mem_state = analysis.get("memory", {})
             if mem_state:
                 self.memory.from_dict(mem_state)
         else:
-            self.session = new_session()
+            self.analysis = new_analysis()
 
         self.current_task_state: Optional[TaskState] = None
         self.last_prompt_metadata: Optional[Dict[str, Any]] = None
@@ -240,19 +240,19 @@ class HireMindAgent:
                         return text[start:i + 1]
         return None
 
-    # ── 会话管理 ──
+    # ── 分析管理 ──
 
     def _record_history(self, role: str, content: str) -> None:
         """记录一条 history 并立即落盘."""
-        self.session.setdefault("history", []).append({
+        self.analysis.setdefault("history", []).append({
             "role": role,
             "content": content,
             "timestamp": _now(),
         })
-        self.session_store.save(self.session)
+        self.analysis_store.save(self.analysis)
 
     def _finalize_run(self, task_state: TaskState, answer: str) -> None:
-        """收尾：写 task_state、report，保存 session."""
+        """收尾：写 task_state、report，保存分析."""
         self.run_store.write_task_state(task_state)
         self.run_store.write_report(task_state, {
             "status": task_state.status,
@@ -264,37 +264,37 @@ class HireMindAgent:
         self.run_store.append_trace(task_state, "run_finished", {
             "status": task_state.status,
         })
-        # 保存 session（含 memory）
-        self.session["memory"] = self.memory.to_dict()
-        self.session_store.save(self.session)
+        # 保存分析（含 memory）
+        self.analysis["memory"] = self.memory.to_dict()
+        self.analysis_store.save(self.analysis)
 
     def reset(self) -> None:
-        """清空当前 session，开始新对话."""
-        self.session = new_session()
+        """清空当前分析，开始新分析."""
+        self.analysis = new_analysis()
         self.memory = HireMindMemory(self.workspace.root)
         self.current_task_state = None
         self.last_prompt_metadata = None
 
     @classmethod
-    def from_session(
+    def from_analysis(
         cls,
         model_client: BaseChatModel,
         workspace: HireMindWorkspace,
-        session_store: SessionStore,
+        analysis_store: AnalysisStore,
         run_store: RunStore,
-        session_id: str,
+        analysis_id: str,
         **kwargs,
     ) -> "HireMindAgent":
-        """从历史 session 恢复 agent."""
-        session = session_store.load(session_id)
-        if not session:
-            raise ValueError(f"Session not found: {session_id}")
+        """从历史分析恢复 agent."""
+        analysis = analysis_store.load(analysis_id)
+        if not analysis:
+            raise ValueError(f"Analysis not found: {analysis_id}")
         return cls(
             model_client=model_client,
             workspace=workspace,
-            session_store=session_store,
+            analysis_store=analysis_store,
             run_store=run_store,
-            session=session,
+            analysis=analysis,
             **kwargs,
         )
 

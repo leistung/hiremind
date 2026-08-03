@@ -132,7 +132,7 @@ class InterviewContextManager:
 
     def _render_interview_result(self) -> str:
         """渲染最近一次分析结果摘要."""
-        result = self.agent.session.get("interview_result")
+        result = self.agent.analysis.get("interview_result")
         if not result:
             return ""
         # 只保留关键字段的摘要
@@ -157,7 +157,7 @@ class InterviewContextManager:
 
     def _render_history(self) -> str:
         """渲染对话历史，保留 recent_window 轮，更老的压缩."""
-        history = self.agent.session.get("history", [])
+        history = self.agent.analysis.get("history", [])
         if not history:
             return ""
 

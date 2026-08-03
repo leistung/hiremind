@@ -2,8 +2,7 @@
 // 优先用 NEXT_PUBLIC_API_BASE 环境变量,默认直连本地 8000 端口
 
 import type {
-  AnalysisHistoryDetail,
-  AnalysisHistoryItem,
+  AnalysisDetail,
   AnalysisResponse,
   InterviewListItem,
   InterviewReport,
@@ -21,8 +20,9 @@ import type {
   ResumeData,
   ResumeListItem,
   ResumeTemplate,
-  SessionSummary,
+  AnalysisSummary,
   ExportResponse,
+  StreamAnalysisEvent,
 } from "./types";
 
 const BASE = process.env.NEXT_PUBLIC_API_BASE || "http://127.0.0.1:8000/api";
@@ -222,35 +222,89 @@ export const api = {
     job_requirements: string;
     resume: string;
     resume_id?: string;
-  }) => postJson<AnalysisResponse>("/analysis/run", body, 10 * 60 * 1000),
-
-  listAnalysisHistory: () =>
-    getJson<{ items: AnalysisHistoryItem[] }>("/analysis/history"),
-
-  getAnalysisHistoryDetail: (session_id: string) =>
-    getJson<AnalysisHistoryDetail>(`/analysis/history/${session_id}`),
+  }) => postJson<AnalysisResponse>("/analysis/run", body),
 
   getInterviewReport: (interview_id: string) =>
     getJson<InterviewReportDetail>(`/interview/${interview_id}/report`),
 
-  // ── 会话 ──
-  listSessions: () =>
-    getJson<{ sessions: SessionSummary[] }>("/sessions"),
+  // ── 分析记录管理 ──
+  listAnalyses: () =>
+    getJson<{ analyses: AnalysisSummary[] }>("/analyses"),
 
-  getSession: (session_id: string) =>
-    getJson<{ session: Record<string, unknown> }>(`/sessions/${session_id}`),
+  getAnalysis: (analysis_id: string) =>
+    getJson<AnalysisDetail>(`/analyses/${analysis_id}`),
 
-  deleteSession: (session_id: string) =>
-    del<{ success: boolean }>(`/sessions/${session_id}`),
+  deleteAnalysis: (analysis_id: string) =>
+    del<{ success: boolean }>(`/analyses/${analysis_id}`),
+
+  cancelAnalysis: (analysis_id: string) =>
+    postJson<{ success: boolean; status: string }>(`/analyses/${analysis_id}/cancel`, {}),
+
+  // SSE 流式接收分析进度
+  // onEvent: 收到一次 SSE 事件(payload 已 JSON 解析)
+  // 返回一个 abort 函数,调用即断开连接
+  streamAnalysis: (
+    analysis_id: string,
+    onEvent: (payload: StreamAnalysisEvent) => void,
+  ): (() => void) => {
+    const controller = new AbortController();
+    const url = `${BASE}/analysis/stream/${analysis_id}`;
+
+    (async () => {
+      try {
+        const res = await fetch(url, {
+          method: "GET",
+          signal: controller.signal,
+          headers: { Accept: "text/event-stream" },
+        });
+        if (!res.ok || !res.body) {
+          onEvent({ error: `HTTP ${res.status}` });
+          return;
+        }
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder("utf-8");
+        let buffer = "";
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          // SSE 事件以双换行分隔
+          let idx: number;
+          while ((idx = buffer.indexOf("\n\n")) >= 0) {
+            const raw = buffer.slice(0, idx);
+            buffer = buffer.slice(idx + 2);
+            // 解析 data: 行
+            const lines = raw.split("\n");
+            const dataLine = lines.find((l) => l.startsWith("data:"));
+            if (!dataLine) continue;
+            const jsonStr = dataLine.slice(5).trim();
+            if (!jsonStr) continue;
+            try {
+              const payload = JSON.parse(jsonStr) as StreamAnalysisEvent;
+              onEvent(payload);
+            } catch {
+              // 忽略解析错误
+            }
+          }
+        }
+      } catch (e) {
+        if ((e as Error).name !== "AbortError") {
+          onEvent({ error: (e as Error).message || "连接失败" });
+        }
+      }
+    })();
+
+    return () => controller.abort();
+  },
 
   // ── 模拟面试 ──
-  startInterview: (session_id: string, max_turns = 8) =>
+  startInterview: (analysis_id: string, max_turns = 8) =>
     postJson<{
       success: boolean;
       state?: InterviewState;
       first_question?: string;
       error?: string;
-    }>("/interview/start", { session_id, max_turns }),
+    }>("/interview/start", { analysis_id, max_turns }),
 
   submitInterviewAnswer: (interview_id: string, answer: string) =>
     postJson<{
@@ -278,6 +332,13 @@ export const api = {
       error?: string;
     }>(`/interview/${interview_id}/finish`, {}),
 
+  // 放弃面试:不生成报告,直接标记为 abandoned
+  abandonInterview: (interview_id: string) =>
+    postJson<{ success: boolean; status: string }>(
+      `/interview/${interview_id}/abandon`,
+      {},
+    ),
+
   getInterviewState: (interview_id: string) =>
     getJson<{ success: boolean; state: InterviewState }>(
       `/interview/${interview_id}/state`,
@@ -290,8 +351,8 @@ export const api = {
     del<{ success: boolean }>(`/interview/${id}`),
 
   // ── 导出 ──
-  exportAnalysisReport: (format: "word" | "pdf", session_id?: string) =>
-    postJson<ExportResponse>("/export", { format, session_id }),
+  exportAnalysisReport: (format: "word" | "pdf", analysis_id?: string) =>
+    postJson<ExportResponse>("/export", { format, analysis_id }),
 
   listReports: () => getJson<{ reports: ReportFile[] }>("/export/list"),
 
