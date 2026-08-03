@@ -39,11 +39,8 @@ from .schemas import (
     AnalysisResponse,
     AnalysisHistoryItem,
     AnalysisHistoryResponse,
-    ChatRequest,
-    ChatResponse,
     ExportRequest,
     ExportResponse,
-    GenerateQuestionsRequest,
     HealthResponse,
     InterviewAnswerRequest,
     InterviewListResponse,
@@ -296,40 +293,6 @@ def get_interview_report(interview_id: str):
     }
 
 
-# ── 对话(保留旧 Agent 对话能力)──
-
-@router.post("/chat", response_model=ChatResponse, tags=["Chat"])
-def chat(req: ChatRequest):
-    try:
-        agent = get_agent()
-        if req.session_id and req.session_id != agent.session.get("id"):
-            from hiremind import HireMindAgent, SessionStore, RunStore
-            ws = get_workspace()
-            agent = HireMindAgent.from_session(
-                model_client=agent.model_client,
-                workspace=ws,
-                session_store=SessionStore(ws.sessions_dir),
-                run_store=RunStore(ws.runs_dir),
-                session_id=req.session_id,
-            )
-        answer = agent.ask(req.message)
-        result_data = agent.session.get("interview_result")
-        return ChatResponse(
-            answer=answer,
-            session_id=agent.session["id"],
-            result=result_data,
-        )
-    except Exception as exc:
-        return ChatResponse(answer="", session_id="", error=str(exc))
-
-
-@router.post("/chat/new-session", tags=["Chat"])
-async def new_session():
-    agent = get_agent()
-    agent.reset()
-    return {"session_id": agent.session["id"]}
-
-
 # ── 会话管理 ──
 
 @router.get("/sessions", response_model=SessionListResponse, tags=["Sessions"])
@@ -361,22 +324,6 @@ async def delete_session(session_id: str):
     if not deleted:
         raise HTTPException(status_code=404, detail="Session not found")
     return {"success": True}
-
-
-# ── 追加出题 ──
-
-@router.post("/questions/generate", tags=["Questions"])
-def generate_more_questions(req: GenerateQuestionsRequest):
-    try:
-        agent = get_agent()
-        result = agent.run_tool("generate_more_questions", {
-            "direction": req.direction,
-            "count": req.count,
-            "topic": req.topic,
-        })
-        return {"success": True, "questions": result, "session_id": agent.session["id"]}
-    except Exception as exc:
-        return {"success": False, "error": str(exc)}
 
 
 # ── 报告导出(分析报告)──

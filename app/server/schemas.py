@@ -22,16 +22,6 @@ class AnalysisRequest(BaseModel):
     resume_id: Optional[str] = None
 
 
-class ChatRequest(BaseModel):
-    """对话请求."""
-
-    message: str
-    session_id: Optional[str] = None
-    model: Optional[str] = None
-    api_key: Optional[str] = None
-    base_url: Optional[str] = None
-
-
 class ModelConfigRequest(BaseModel):
     """模型配置更新."""
 
@@ -56,14 +46,6 @@ class ModelTestResponse(BaseModel):
     latency_ms: int = 0
     reply: str = ""
     error: str = ""
-
-
-class GenerateQuestionsRequest(BaseModel):
-    """追加出题请求."""
-
-    direction: str
-    count: int = 2
-    topic: str = ""
 
 
 # ── 简历 ──
@@ -162,13 +144,6 @@ class AnalysisResponse(BaseModel):
     success: bool
     result: Optional[Dict[str, Any]] = None
     session_id: str
-    error: Optional[str] = None
-
-
-class ChatResponse(BaseModel):
-    answer: str
-    session_id: str
-    result: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
 
 

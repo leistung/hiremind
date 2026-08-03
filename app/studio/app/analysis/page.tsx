@@ -15,6 +15,7 @@ import type {
   Question,
   ResumeData,
   ResumeListItem,
+  SessionSummary,
 } from "@/lib/types";
 
 type ResumeSource =
@@ -86,6 +87,11 @@ function AnalysisPageInner() {
   // 轮询取消标志:组件卸载或新一轮分析时置 true,停止旧轮询
   const pollCancelRef = useRef(false);
 
+  // 会话管理
+  const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [loadingSessions, setLoadingSessions] = useState(false);
+  const [deletingSessionId, setDeletingSessionId] = useState("");
+
   // 初始化:读取 sessionStorage 恢复上次未完成的分析
   useEffect(() => {
     if (restored) return;
@@ -152,6 +158,13 @@ function AnalysisPageInner() {
       // JSON 解析失败,忽略
     }
   }, [restored]);
+
+  // 进入空状态(无结果且未运行)时自动加载会话列表
+  useEffect(() => {
+    if (!result && !running && sessions.length === 0 && !loadingSessions) {
+      loadSessions();
+    }
+  }, [result, running]);
 
   // 持久化:running / result / sessionId / 表单 任一变化时同步到 sessionStorage
   // 用 ref 保存 analysisStartedAt,避免它变化触发持久化 effect(它只在 runAnalysis 时设置)
@@ -482,6 +495,51 @@ function AnalysisPageInner() {
     setShowStopConfirm(false);
   }
 
+  // 会话管理:加载会话列表
+  async function loadSessions() {
+    setLoadingSessions(true);
+    try {
+      const r = await api.listSessions();
+      setSessions(r.sessions || []);
+    } catch {
+      setSessions([]);
+    } finally {
+      setLoadingSessions(false);
+    }
+  }
+
+  // 会话管理:加载某个会话的分析结果
+  async function loadSessionResult(sid: string) {
+    try {
+      const r = await api.getSession(sid);
+      const session = r.session as Record<string, unknown>;
+      const ir = session.interview_result as InterviewResult | undefined;
+      if (ir) {
+        setResult(ir);
+        setSessionId(sid);
+        setError("");
+      } else {
+        setError("该会话没有分析报告");
+      }
+    } catch {
+      setError("加载会话失败");
+    }
+  }
+
+  // 会话管理:删除会话
+  async function deleteSession(sid: string) {
+    if (!confirm("确定删除该会话?删除后不可恢复。")) return;
+    setDeletingSessionId(sid);
+    try {
+      await api.deleteSession(sid);
+      setSessions((prev) => prev.filter((s) => s.id !== sid));
+    } catch {
+      setError("删除会话失败");
+    } finally {
+      setDeletingSessionId("");
+    }
+  }
+
   return (
     <div className="flex h-screen">
       {/* 左侧:表单 */}
@@ -744,11 +802,78 @@ function AnalysisPageInner() {
       {/* 右侧:报告 */}
       <div className="flex-1 min-w-0 overflow-y-auto">
         {!result && !running && (
-          <div className="h-full flex flex-col items-center justify-center text-stone-400">
-            <svg className="w-12 h-12 mb-3 opacity-40" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-            </svg>
-            <div className="text-[14px]">完成左侧表单后,这里会显示分析报告</div>
+          <div className="h-full flex flex-col">
+            {/* 顶部提示 */}
+            <div className="flex flex-col items-center justify-center py-10 text-stone-400">
+              <svg className="w-12 h-12 mb-3 opacity-40" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+              </svg>
+              <div className="text-[14px]">完成左侧表单后,这里会显示分析报告</div>
+              <div className="text-[12px] mt-1">或从下方会话记录中加载历史分析</div>
+            </div>
+
+            {/* 会话管理 */}
+            <div className="flex-1 px-8 pb-8 overflow-y-auto">
+              <div className="max-w-[720px] mx-auto">
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="text-[15px] font-semibold text-stone-700">会话记录</h2>
+                  <button
+                    onClick={loadSessions}
+                    disabled={loadingSessions}
+                    className="btn btn-secondary text-[12px]"
+                    style={{ padding: "5px 12px" }}
+                  >
+                    {loadingSessions ? "刷新中…" : "刷新"}
+                  </button>
+                </div>
+
+                {loadingSessions && sessions.length === 0 ? (
+                  <div className="text-[13px] text-stone-400 py-8 text-center">加载中…</div>
+                ) : sessions.length === 0 ? (
+                  <div className="text-[13px] text-stone-400 py-8 text-center">
+                    暂无会话记录,完成左侧表单后点击「开始分析」即可创建
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {sessions.map((s) => (
+                      <div
+                        key={s.id}
+                        className="card p-3 flex items-center gap-3 hover:shadow-sm transition-shadow"
+                      >
+                        <div className="flex-1 min-w-0">
+                          <div className="text-[13px] font-medium text-stone-700 truncate">
+                            {s.title || "未命名会话"}
+                          </div>
+                          <div className="text-[11px] text-stone-400 mt-0.5 flex items-center gap-3">
+                            <span>{relativeTime(s.updated_at || s.created_at)}</span>
+                            {s.message_count > 0 && (
+                              <span>{s.message_count} 条消息</span>
+                            )}
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => loadSessionResult(s.id)}
+                          className="btn btn-secondary text-[12px]"
+                          style={{ padding: "4px 12px" }}
+                          title="加载该会话的分析报告"
+                        >
+                          加载
+                        </button>
+                        <button
+                          onClick={() => deleteSession(s.id)}
+                          disabled={deletingSessionId === s.id}
+                          className="btn btn-danger text-[12px]"
+                          style={{ padding: "4px 12px" }}
+                          title="删除该会话"
+                        >
+                          {deletingSessionId === s.id ? "…" : "删除"}
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
           </div>
         )}
 

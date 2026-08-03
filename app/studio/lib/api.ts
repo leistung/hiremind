@@ -237,6 +237,12 @@ export const api = {
   listSessions: () =>
     getJson<{ sessions: SessionSummary[] }>("/sessions"),
 
+  getSession: (session_id: string) =>
+    getJson<{ session: Record<string, unknown> }>(`/sessions/${session_id}`),
+
+  deleteSession: (session_id: string) =>
+    del<{ success: boolean }>(`/sessions/${session_id}`),
+
   // ── 模拟面试 ──
   startInterview: (session_id: string, max_turns = 8) =>
     postJson<{
