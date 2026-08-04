@@ -26,6 +26,7 @@ from ..prompts import (
     INTERVIEW_FIRST_QUESTION_PROMPT,
     INTERVIEW_NEXT_QUESTION_PROMPT,
     STAGE_FIRST_QUESTION_PROMPT,
+    STAGE_PLANNER_PROMPT,
     STAGE_SUMMARY_PROMPT,
     WRITTEN_BATCH_EVALUATE_PROMPT,
     WRITTEN_EXAM_GENERATOR_PROMPT,
@@ -78,6 +79,22 @@ class _FinalReport(BaseModel):
     summary: str = Field(default="")
 
 
+class _StagePlanItem(BaseModel):
+    """智能规划的单个阶段."""
+
+    stage_type: InterviewStageType
+    stage_name: str = ""
+    question_count: int = Field(default=10, ge=1, le=20)
+    focus: str = ""
+    rationale: str = ""
+
+
+class _StagePlan(BaseModel):
+    """智能阶段规划结果."""
+
+    stages: List[_StagePlanItem] = Field(default_factory=list)
+
+
 # ── 默认阶段配置 ──
 
 DEFAULT_STAGE_CONFIGS: List[StageConfig] = [
@@ -87,11 +104,99 @@ DEFAULT_STAGE_CONFIGS: List[StageConfig] = [
     StageConfig(stage_type=InterviewStageType.HR, stage_name="人事面"),
 ]
 
+
+def recommend_stage_configs(
+    result: InterviewResult,
+    expected_rounds: int = 4,
+    company_business_scope: str = "",
+    jd_summary: str = "",
+) -> List[StageConfig]:
+    """根据分析报告 + 期望轮次,用 LLM 智能规划面试阶段方案.
+
+    LLM 综合判断岗位类别、级别(薪资)、公司类型,输出阶段类型/题数/侧重/理由。
+    失败时降级为 DEFAULT_STAGE_CONFIGS 裁剪到 expected_rounds。
+    """
+    expected_rounds = max(2, min(6, expected_rounds))
+    try:
+        llm = get_llm()
+        structured_llm = llm.with_structured_output(_StagePlan)
+        chain = STAGE_PLANNER_PROMPT | structured_llm
+        plan = chain.invoke(
+            {
+                "company_name": result.company_name,
+                "job_title": result.job_title,
+                "company_business_scope": company_business_scope or "（未提供）",
+                "jd_summary": (jd_summary or "")[:1500] or "（未提供 JD）",
+                "match_analysis": result.match_analysis.model_dump_json(indent=2),
+                "business_scenarios": "\n\n".join(
+                    s.model_dump_json(indent=2) for s in result.business_scenarios
+                ),
+                "risks": "\n\n".join(r.model_dump_json(indent=2) for r in result.risks),
+                "expected_rounds": expected_rounds,
+            }
+        )
+        if not plan.stages:
+            raise ValueError("LLM 返回空阶段列表")
+        configs: List[StageConfig] = []
+        for item in plan.stages:
+            # 笔试题数 clamp 到 5-20,对话题数 clamp 到 1-9
+            qc = item.question_count
+            if item.stage_type == InterviewStageType.WRITTEN:
+                qc = max(5, min(20, qc))
+            else:
+                qc = max(1, min(9, qc))
+            configs.append(
+                StageConfig(
+                    stage_type=item.stage_type,
+                    stage_name=item.stage_name or item.stage_type.value,
+                    question_count=qc,
+                    focus=item.focus,
+                    rationale=item.rationale,
+                )
+            )
+        return configs
+    except Exception:
+        # 降级:默认配置裁剪到期望轮次
+        return _fallback_stage_configs(expected_rounds)
+
+
+def _fallback_stage_configs(expected_rounds: int) -> List[StageConfig]:
+    """LLM 失败时的降级方案:根据轮次数裁剪默认配置."""
+    base = list(DEFAULT_STAGE_CONFIGS)
+    if expected_rounds >= len(base):
+        return base
+    if expected_rounds <= 2:
+        # 2 轮:技术一面 + HR
+        return [
+            StageConfig(stage_type=InterviewStageType.TECH_1, stage_name="技术一面"),
+            StageConfig(stage_type=InterviewStageType.HR, stage_name="人事面"),
+        ]
+    if expected_rounds == 3:
+        # 3 轮:笔试 + 技术一面 + HR
+        return [
+            StageConfig(stage_type=InterviewStageType.WRITTEN, stage_name="笔试", question_count=10),
+            StageConfig(stage_type=InterviewStageType.TECH_1, stage_name="技术一面"),
+            StageConfig(stage_type=InterviewStageType.HR, stage_name="人事面"),
+        ]
+    # 4 轮及以上:默认4阶段
+    return base[:expected_rounds]
+
 # 阶段映射到题库轮次索引(0-based),题库不足时取模循环
 _STAGE_ROUND_MAPPING: Dict[InterviewStageType, List[int]] = {
-    InterviewStageType.TECH_1: [0, 1],   # 第1-2轮:技术基础
-    InterviewStageType.TECH_2: [2, 3],   # 第3-4轮:业务场景/系统设计
-    InterviewStageType.HR: [4],          # 第5轮:行为/文化
+    InterviewStageType.TECH_1: [0, 1],         # 第1-2轮:技术基础
+    InterviewStageType.TECH_2: [2, 3],         # 第3-4轮:业务场景/系统设计
+    InterviewStageType.SYSTEM_DESIGN: [2, 3],  # 第3-4轮:业务场景/系统设计
+    InterviewStageType.BEHAVIORAL: [4],        # 第5轮:行为/文化
+    InterviewStageType.HR: [4],                # 第5轮:行为/文化
+    InterviewStageType.BOSS: [4],              # 第5轮:综合
+}
+
+# 阶段类型 → 补充题目的方向字段(题库 InterviewQuestions 的按方向分组字段)
+_STAGE_DIRECTION_MAPPING: Dict[InterviewStageType, List[str]] = {
+    InterviewStageType.SYSTEM_DESIGN: ["business_scenario"],
+    InterviewStageType.BEHAVIORAL: ["behavioral_cultural"],
+    InterviewStageType.HR: ["pressure_adaptability", "behavioral_cultural"],
+    InterviewStageType.BOSS: ["resume_deep_dive", "behavioral_cultural"],
 }
 
 
@@ -252,6 +357,9 @@ class MockInterview:
         for idx in round_indices:
             if idx < len(rounds):
                 qs.extend(rounds[idx].questions or [])
+        # 补充方向字段题目(系统设计/行为/HR/老板面)
+        for attr in _STAGE_DIRECTION_MAPPING.get(stage_type, []):
+            qs.extend(getattr(self.result.questions, attr, []) or [])
         # 题库不足时,从全部题目补充
         if not qs:
             qs = list(self.all_questions)

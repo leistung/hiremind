@@ -32,6 +32,7 @@ from hiremind.services import (
     new_interview,
     parse_document,
     parse_resume_text_to_structured,
+    recommend_stage_configs,
 )
 from hiremind.services.llm_service import get_llm
 
@@ -67,6 +68,7 @@ from .schemas import (
     ResumeExportRequest,
     ResumeListResponse,
     ResumeParseRequest,
+    StageRecommendRequest,
     WrittenAnswerRequest,
 )
 
@@ -869,6 +871,47 @@ def _serialize_interview_state(iv: MockInterview) -> dict:
         ),
     }
     return state
+
+
+@router.post("/interview/stages/recommend", tags=["Interview"])
+def recommend_stages(req: StageRecommendRequest):
+    """根据分析报告 + 期望轮次,智能规划面试阶段方案.
+
+    LLM 综合判断岗位类别、级别(薪资)、公司类型,输出阶段类型/题数/侧重/理由。
+    前端展示后由用户确认,再调用 /interview/start 启动。
+    """
+    try:
+        agent = get_agent()
+        if req.analysis_id and req.analysis_id != agent.analysis.get("id"):
+            from hiremind import HireMindAgent, AnalysisStore, RunStore
+            ws = get_workspace()
+            agent = HireMindAgent.from_analysis(
+                model_client=agent.model_client,
+                workspace=ws,
+                analysis_store=AnalysisStore(ws.analyses_dir),
+                run_store=RunStore(ws.runs_dir),
+                analysis_id=req.analysis_id,
+            )
+        result_data = agent.analysis.get("interview_result")
+        if not result_data:
+            return {"success": False, "error": "该分析尚未生成报告,请先在分析页生成报告"}
+        result = InterviewResult.model_validate(result_data)
+        company_business_scope = agent.analysis.get("company_business_scope", "") or ""
+        job_requirements = agent.analysis.get("job_requirements", "") or ""
+        configs = recommend_stage_configs(
+            result=result,
+            expected_rounds=req.expected_rounds,
+            company_business_scope=company_business_scope,
+            jd_summary=job_requirements,
+        )
+        return {
+            "success": True,
+            "stages": [c.model_dump() for c in configs],
+            "company_name": result.company_name,
+            "job_title": result.job_title,
+        }
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
 
 
 @router.post("/interview/start", tags=["Interview"])

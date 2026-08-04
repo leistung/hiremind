@@ -282,10 +282,13 @@ class InterviewTurn(BaseModel):
 class InterviewStageType(str, Enum):
     """面试阶段类型."""
 
-    WRITTEN = "written"    # 笔试
-    TECH_1 = "tech_1"      # 技术一面
-    TECH_2 = "tech_2"      # 技术二面
-    HR = "hr"              # 人事面/性格测试
+    WRITTEN = "written"              # 笔试
+    TECH_1 = "tech_1"                # 技术一面(基础+项目)
+    TECH_2 = "tech_2"                # 技术二面(深挖+场景)
+    SYSTEM_DESIGN = "system_design"  # 系统设计/架构面
+    BEHAVIORAL = "behavioral"        # 行为面/文化
+    HR = "hr"                        # 人事面/性格测试
+    BOSS = "boss"                    # 老板面/总监面
 
 
 class StageConfig(BaseModel):
@@ -298,6 +301,10 @@ class StageConfig(BaseModel):
     # 校验放宽为 1-20:对话阶段也会带 question_count(=max_turns,可能 <5),
     # 笔试的实际 5-20 限制由前端滑块 + _generate_written_questions 内 clamp 保证
     question_count: int = Field(default=15, ge=1, le=20, description="笔试题数")
+    # 本轮侧重方向(智能生成时填充,如"后端基础+项目深挖")
+    focus: str = Field(default="", description="本轮考察侧重")
+    # 安排理由(智能生成时填充,说明为何这么安排)
+    rationale: str = Field(default="", description="本轮安排理由")
 
 
 class InterviewStageTurn(BaseModel):

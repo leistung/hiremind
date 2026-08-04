@@ -222,10 +222,20 @@ export interface WrittenQuestionItem {
 }
 
 export interface StageConfig {
-  stage_type: string;    // written / tech_1 / tech_2 / hr
+  stage_type: string;    // written / tech_1 / tech_2 / system_design / behavioral / hr / boss
   stage_name: string;
   enabled: boolean;
   question_count: number; // 笔试专用
+  focus?: string;         // 本轮考察侧重
+  rationale?: string;     // 安排理由
+}
+
+export interface StageRecommendResponse {
+  success: boolean;
+  stages?: StageConfig[];
+  company_name?: string;
+  job_title?: string;
+  error?: string;
 }
 
 export interface StageSummary {

@@ -111,6 +111,13 @@ class InterviewStartRequest(BaseModel):
     stages: List[Dict[str, Any]] = []
 
 
+class StageRecommendRequest(BaseModel):
+    """智能规划面试阶段方案."""
+
+    analysis_id: str = ""
+    expected_rounds: int = Field(default=4, ge=2, le=6, description="期望面试轮次")
+
+
 class InterviewAnswerRequest(BaseModel):
     """提交回答."""
 

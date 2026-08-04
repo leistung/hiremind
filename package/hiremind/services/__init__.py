@@ -14,6 +14,7 @@ from .interview_service import (
     InterviewStore,
     MockInterview,
     new_interview,
+    recommend_stage_configs,
 )
 
 __all__ = [
@@ -31,4 +32,5 @@ __all__ = [
     "InterviewStore",
     "new_interview",
     "DEFAULT_STAGE_CONFIGS",
+    "recommend_stage_configs",
 ]

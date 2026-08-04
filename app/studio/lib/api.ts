@@ -23,6 +23,7 @@ import type {
   AnalysisSummary,
   ExportResponse,
   StageConfig,
+  StageRecommendResponse,
   StageSummary,
   StreamAnalysisEvent,
 } from "./types";
@@ -300,6 +301,13 @@ export const api = {
   },
 
   // ── 模拟面试 ──
+  // 智能规划面试阶段方案:LLM 根据岗位/公司/期望轮次生成阶段配置
+  recommendStages: (analysis_id: string, expected_rounds: number) =>
+    postJson<StageRecommendResponse>("/interview/stages/recommend", {
+      analysis_id,
+      expected_rounds,
+    }),
+
   startInterview: (
     analysis_id: string,
     max_turns = 8,
