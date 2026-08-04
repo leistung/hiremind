@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, Suspense } from "react";
+import { useSearchParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { api } from "@/lib/api";
 import { formatDate, relativeTime, scoreColor } from "@/lib/utils";
@@ -18,8 +19,52 @@ import type {
 
 type Tab = "analysis" | "interview";
 
-export default function HistoryPage() {
+// 来源跳转按钮:跳到另一个 tab 的某条记录(用 URL query 参数传递目标)
+function SourceLink({
+  label,
+  value,
+  href,
+  onJump,
+}: {
+  label: string;
+  value: string;
+  href: string;
+  onJump?: () => void;
+}) {
+  return (
+    <div className="flex items-center gap-2 text-[12px]">
+      <span className="text-stone-400">{label}:</span>
+      <Link
+        href={href}
+        onClick={onJump}
+        className="font-mono text-stone-500 hover:text-orange-700 hover:underline truncate max-w-[280px]"
+        title={`点击查看: ${value}`}
+      >
+        {value}
+      </Link>
+    </div>
+  );
+}
+
+export default function HistoryPageWrapper() {
+  return (
+    <Suspense fallback={<div className="p-8 text-stone-400">加载中…</div>}>
+      <HistoryPage />
+    </Suspense>
+  );
+}
+
+function HistoryPage() {
+  const searchParams = useSearchParams();
+  const router = useRouter();
   const [tab, setTab] = useState<Tab>("analysis");
+
+  // 切换 tab:同时更新 URL,清除旧的 aid/iid 参数,
+  // 否则再次点击相同 aid 的跳转链接时 Next.js 认为是相同 URL 不导航
+  function switchTab(next: Tab) {
+    setTab(next);
+    router.replace(`/history?tab=${next}`);
+  }
 
   // 分析历史
   const [analysisItems, setAnalysisItems] = useState<AnalysisSummary[]>([]);
@@ -118,6 +163,20 @@ export default function HistoryPage() {
       .finally(() => setLoadingInterview(false));
   }, [selectedInterviewId]);
 
+  // 处理跨 tab 跳转:?tab=analysis&aid=xxx 或 ?tab=interview&iid=xxx
+  useEffect(() => {
+    const targetTab = searchParams.get("tab") as Tab | null;
+    const aid = searchParams.get("aid");
+    const iid = searchParams.get("iid");
+    if (targetTab === "analysis" && aid) {
+      setTab("analysis");
+      setSelectedAnalysisId(aid);
+    } else if (targetTab === "interview" && iid) {
+      setTab("interview");
+      setSelectedInterviewId(iid);
+    }
+  }, [searchParams]);
+
   return (
     <div className="flex h-screen flex-col">
       {/* 顶栏 */}
@@ -144,13 +203,13 @@ export default function HistoryPage() {
         <div className="flex gap-1">
           <TabButton
             active={tab === "analysis"}
-            onClick={() => setTab("analysis")}
+            onClick={() => switchTab("analysis")}
             label="面试分析"
             count={analysisItems.length}
           />
           <TabButton
             active={tab === "interview"}
-            onClick={() => setTab("interview")}
+            onClick={() => switchTab("interview")}
             label="模拟面试"
             count={interviewItems.length}
           />
@@ -550,6 +609,19 @@ function InterviewListCard({
             <span>·</span>
             <span>{relativeTime(item.created_at)}</span>
           </div>
+          {item.analysis_id && (
+            <Link
+              href={`/history?tab=analysis&aid=${item.analysis_id}`}
+              onClick={(e) => e.stopPropagation()}
+              className="inline-flex items-center gap-1 text-[10px] mt-1 font-mono text-stone-400 hover:text-orange-700 hover:underline"
+              title={`来源分析 ID: ${item.analysis_id}(点击跳转查看)`}
+            >
+              <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+              </svg>
+              {item.analysis_id}
+            </Link>
+          )}
         </div>
       </div>
     </div>
@@ -563,6 +635,13 @@ function AnalysisReportView({ detail }: { detail: AnalysisDetail }) {
   const result: InterviewResult = detail.result!;
   const title = `${result.company_name || "未指定公司"} · ${result.job_title || "未指定岗位"}`;
   const subtitle = `面试分析报告 · 生成于 ${formatDate(detail.created_at)}`;
+  // 从 metadata 提取简历/职位来源(用于溯源跳转)
+  const meta = (detail.metadata || {}) as Record<string, string>;
+  const resumeName = meta.resume_name || "";
+  const positionName = meta.position_name || "";
+  const resumeId = meta.resume_id || "";
+  const positionId = meta.position_id || "";
+  const hasMeta = Boolean(resumeName || positionName);
 
   return (
     <>
@@ -575,6 +654,42 @@ function AnalysisReportView({ detail }: { detail: AnalysisDetail }) {
             </h1>
             <div className="text-[12px] text-stone-400">
               面试分析报告 · 生成于 {formatDate(detail.created_at)}
+            </div>
+            {/* 来源信息:简历 + 职位(有 metadata 时显示具体名称,否则显示通用入口) */}
+            <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1">
+              {hasMeta ? (
+                <>
+                  {resumeName && (
+                    <SourceLink
+                      label="简历"
+                      value={resumeName}
+                      href={resumeId ? `/resumes?resume=${resumeId}` : "/resumes"}
+                    />
+                  )}
+                  {positionName && (
+                    <SourceLink
+                      label="职位"
+                      value={positionName}
+                      href={positionId ? `/positions?position=${positionId}` : "/positions"}
+                    />
+                  )}
+                </>
+              ) : (
+                <>
+                  <Link
+                    href="/resumes"
+                    className="text-[12px] text-stone-400 hover:text-orange-700 hover:underline"
+                  >
+                    查看简历库 →
+                  </Link>
+                  <Link
+                    href="/positions"
+                    className="text-[12px] text-stone-400 hover:text-orange-700 hover:underline"
+                  >
+                    查看职位库 →
+                  </Link>
+                </>
+              )}
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -919,6 +1034,15 @@ function InterviewReportView({ detail }: { detail: InterviewReportDetail }) {
               模拟面试记录 · {detail.turns.length} 轮问答 · {statusText}
               {report?.created_at && ` · ${formatDate(report.created_at)}`}
             </div>
+            {detail.analysis_id && (
+              <div className="mt-2">
+                <SourceLink
+                  label="来源分析"
+                  value={detail.analysis_id}
+                  href={`/history?tab=analysis&aid=${detail.analysis_id}`}
+                />
+              </div>
+            )}
           </div>
           <FullscreenButton onClick={() => setFullscreen(true)} />
         </div>

@@ -314,6 +314,7 @@ export interface AnalysisDetail {
   result: InterviewResult | null;
   error?: string;
   model?: string;
+  metadata?: Record<string, unknown>;
 }
 
 // SSE 流式进度事件:后端 stream_analysis_progress 推送的 payload
@@ -331,6 +332,7 @@ export interface StreamAnalysisEvent {
 export interface InterviewReportDetail {
   success: boolean;
   interview_id: string;
+  analysis_id?: string;
   status: string;
   company_name: string;
   job_title: string;

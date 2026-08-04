@@ -200,9 +200,16 @@ def run_analysis(req: AnalysisRequest):
         company_name = (req.company_name or "").strip() or "未指定公司"
         job_title = (req.job_title or "").strip() or "未指定岗位"
         # 记录启动时使用的模型,供前端显示(分析启动后改模型不影响本次)
+        # 把简历/职位来源存入 metadata,供历史记录页溯源跳转
         analysis = new_analysis(
             title=f"{company_name}-{job_title}",
             model=settings.model_name,
+            metadata={
+                "resume_id": req.resume_id or "",
+                "resume_name": (req.resume_name or ""),
+                "position_id": (req.position_id or ""),
+                "position_name": (req.position_name or ""),
+            },
         )
         analysis_store.save(analysis)
         analysis_id = analysis["id"]
@@ -241,12 +248,16 @@ def run_analysis(req: AnalysisRequest):
 
                 def _on_progress(node_name: str, label: str):
                     completed_nodes.append({"node": node_name, "label": label})
+                    progress = {
+                        "completed": list(completed_nodes),
+                        "current": label if node_name != "done" else None,
+                    }
+                    # 同步更新 agent 的内存副本,避免最终保存时覆盖 progress 字段
+                    agent.analysis["progress"] = progress
+                    # 写入磁盘供 SSE 端点轮询读取
                     a = analysis_store.load(analysis_id)
                     if a is not None:
-                        a["progress"] = {
-                            "completed": list(completed_nodes),
-                            "current": label if node_name != "done" else None,
-                        }
+                        a["progress"] = progress
                         analysis_store.save(a)
 
                 run_analysis_with_progress(agent, params, on_progress=_on_progress)
@@ -299,6 +310,7 @@ def get_interview_report(interview_id: str):
     return {
         "success": True,
         "interview_id": interview_id,
+        "analysis_id": iv.analysis_id,
         "status": iv.status,
         "company_name": iv.result.company_name,
         "job_title": iv.result.job_title,
@@ -365,6 +377,7 @@ async def get_analysis(analysis_id: str):
         result=result if status == "completed" and result else None,
         error=analysis.get("error") if status == "error" else None,
         model=analysis.get("model", "") or "",
+        metadata=analysis.get("metadata", {}) or {},
     )
 
 

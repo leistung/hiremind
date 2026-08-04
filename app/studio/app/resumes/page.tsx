@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, Suspense } from "react";
+import { useSearchParams } from "next/navigation";
 import { api } from "@/lib/api";
 import { relativeTime, downloadReport } from "@/lib/utils";
 import type {
@@ -16,7 +17,16 @@ import type {
 import ResumePreview from "@/components/ResumePreview";
 import FullscreenPreview, { FullscreenButton } from "@/components/FullscreenPreview";
 
-export default function ResumesPage() {
+export default function ResumesPageWrapper() {
+  return (
+    <Suspense fallback={<div className="p-8 text-stone-400">加载中…</div>}>
+      <ResumesPage />
+    </Suspense>
+  );
+}
+
+function ResumesPage() {
+  const searchParams = useSearchParams();
   const [list, setList] = useState<ResumeListItem[]>([]);
   const [templates, setTemplates] = useState<Record<string, ResumeTemplate>>({});
   const [current, setCurrent] = useState<Resume | null>(null);
@@ -30,11 +40,47 @@ export default function ResumesPage() {
   const [fullscreen, setFullscreen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const photoInputRef = useRef<HTMLInputElement>(null);
+  // 列表容器 ref,用于滚动定位到选中项
+  const listRef = useRef<HTMLDivElement>(null);
+  // 记录上次已处理的 resumeParam,避免列表刷新时反复跳回参数指定的简历
+  const processedParamRef = useRef<string | null>(null);
 
   useEffect(() => {
     refreshList();
     api.listResumeTemplates().then((r) => setTemplates(r.templates || {})).catch(() => {});
   }, []);
+
+  // 支持 ?resume=<id> 预选(从面试分析溯源跳转过来)
+  const resumeParam = searchParams.get("resume");
+  useEffect(() => {
+    if (list.length === 0) return;
+
+    // 1) 如果 URL 参数变化了(或首次出现),优先选中参数指定的简历
+    if (resumeParam && resumeParam !== processedParamRef.current) {
+      processedParamRef.current = resumeParam;
+      const exists = list.some((r) => r.id === resumeParam);
+      if (exists) {
+        loadResume(resumeParam);
+        return;
+      }
+    }
+
+    // 2) 如果当前没有选中(或选中的已被删除),默认选第一个
+    const currentExists = current && list.some((r) => r.id === current.id);
+    if (!currentExists) {
+      loadResume(list[0].id);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resumeParam, list]);
+
+  // 选中项变化时滚动到列表中对应位置
+  useEffect(() => {
+    if (!current || !listRef.current) return;
+    const el = listRef.current.querySelector(`[data-resume-id="${current.id}"]`);
+    if (el) {
+      el.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
+  }, [current]);
 
   useEffect(() => {
     if (!toast) return;
@@ -46,10 +92,6 @@ export default function ResumesPage() {
     try {
       const r = await api.listResumes();
       setList(r.resumes || []);
-      // 默认选中第一个
-      if (r.resumes && r.resumes.length > 0 && !current) {
-        loadResume(r.resumes[0].id);
-      }
     } catch {
       setError("加载简历列表失败");
     }
@@ -246,7 +288,7 @@ export default function ResumesPage() {
             }}
           />
         </div>
-        <div className="flex-1 overflow-y-auto px-2 py-2">
+        <div ref={listRef} className="flex-1 overflow-y-auto px-2 py-2">
           {list.length === 0 ? (
             <div className="text-[12px] text-stone-400 text-center py-8 px-3">
               还没有简历,点击上方按钮新建或上传
@@ -257,6 +299,7 @@ export default function ResumesPage() {
               return (
                 <button
                   key={r.id}
+                  data-resume-id={r.id}
                   onClick={() => loadResume(r.id)}
                   className={`w-full text-left px-3 py-2.5 rounded-lg mb-1 transition ${
                     active ? "" : "hover:bg-white/60"

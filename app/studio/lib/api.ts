@@ -225,6 +225,9 @@ export const api = {
     job_requirements: string;
     resume: string;
     resume_id?: string;
+    resume_name?: string;
+    position_id?: string;
+    position_name?: string;
   }) => postJson<AnalysisResponse>("/analysis/run", body),
 
   getInterviewReport: (interview_id: string) =>

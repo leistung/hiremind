@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState, Suspense } from "react";
+import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { api } from "@/lib/api";
 import { relativeTime } from "@/lib/utils";
@@ -26,7 +27,16 @@ function emptyDraft(): DraftPosition {
   };
 }
 
-export default function PositionsPage() {
+export default function PositionsPageWrapper() {
+  return (
+    <Suspense fallback={<div className="p-8 text-stone-400">加载中…</div>}>
+      <PositionsPage />
+    </Suspense>
+  );
+}
+
+function PositionsPage() {
+  const searchParams = useSearchParams();
   const [list, setList] = useState<PositionListItem[]>([]);
   const [current, setCurrent] = useState<Position | null>(null);
   const [draft, setDraft] = useState<DraftPosition>(emptyDraft());
@@ -36,10 +46,42 @@ export default function PositionsPage() {
   const [error, setError] = useState("");
   const [toast, setToast] = useState("");
   const [query, setQuery] = useState("");
+  // 列表容器 ref,用于滚动定位到选中项
+  const listRef = useRef<HTMLDivElement>(null);
+  // 记录上次已处理的 positionParam,避免列表刷新时反复跳回参数指定的职位
+  const processedParamRef = useRef<string | null>(null);
 
   useEffect(() => {
     refresh();
   }, []);
+
+  // 支持 ?position=<id> 预选(从面试分析溯源跳转过来)
+  const positionParam = searchParams.get("position");
+  useEffect(() => {
+    if (list.length === 0) return;
+
+    // 1) 如果 URL 参数变化了(或首次出现),优先选中参数指定的职位
+    if (positionParam && positionParam !== processedParamRef.current) {
+      processedParamRef.current = positionParam;
+      const exists = list.some((p) => p.id === positionParam);
+      if (exists) {
+        selectPosition(positionParam);
+        return;
+      }
+    }
+
+    // 2) 如果当前没有选中(或选中的已被删除),不自动选中(职位页默认显示空状态)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [positionParam, list]);
+
+  // 选中项变化时滚动到列表中对应位置
+  useEffect(() => {
+    if (!current || !listRef.current) return;
+    const el = listRef.current.querySelector(`[data-position-id="${current.id}"]`);
+    if (el) {
+      el.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
+  }, [current]);
 
   useEffect(() => {
     if (!toast) return;
@@ -169,7 +211,7 @@ export default function PositionsPage() {
           />
         </div>
 
-        <div className="flex-1 overflow-y-auto px-3 pb-3 space-y-1.5">
+        <div ref={listRef} className="flex-1 overflow-y-auto px-3 pb-3 space-y-1.5">
           {loading && list.length === 0 && (
             <div className="text-center text-[12px] text-stone-400 py-8">加载中…</div>
           )}
@@ -190,6 +232,7 @@ export default function PositionsPage() {
             return (
               <button
                 key={p.id}
+                data-position-id={p.id}
                 onClick={() => selectPosition(p.id)}
                 className="w-full text-left p-3 rounded-lg transition"
                 style={{

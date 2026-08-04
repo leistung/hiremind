@@ -6,6 +6,19 @@ from typing import Optional
 from langchain_core.language_models.chat_models import BaseChatModel
 
 
+def _get_llm_callbacks():
+    """获取 LLM 日志 callback 列表.
+
+    延迟导入避免循环依赖(llm_logger 位于 app/server,而本模块位于 package/)。
+    仅在后端服务环境下启用;测试或独立使用 package 时若导入失败则不附加 callback。
+    """
+    try:
+        from app.server.llm_logger import get_llm_callbacks
+        return get_llm_callbacks()
+    except Exception:
+        return None
+
+
 def get_llm(
     model: Optional[str] = None,
     api_key: Optional[str] = None,
@@ -31,6 +44,7 @@ def get_llm(
     resolved_model = model or os.getenv("MODEL_NAME", "qwen3.7-plus")
     resolved_key = api_key or os.getenv("OPENAI_API_KEY") or os.getenv("ANTHROPIC_API_KEY")
     resolved_base_url = base_url or os.getenv("OPENAI_BASE_URL")
+    callbacks = _get_llm_callbacks()
 
     if resolved_model.startswith("claude"):
         try:
@@ -41,6 +55,7 @@ def get_llm(
             model=resolved_model,
             api_key=resolved_key,
             temperature=temperature,
+            callbacks=callbacks,
         )
 
     try:
@@ -55,5 +70,7 @@ def get_llm(
     }
     if resolved_base_url:
         kwargs["base_url"] = resolved_base_url
+    if callbacks:
+        kwargs["callbacks"] = callbacks
 
     return ChatOpenAI(**kwargs)

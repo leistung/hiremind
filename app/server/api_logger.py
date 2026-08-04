@@ -4,9 +4,9 @@
 文件名按天自动切换,便于排查问题与审计。
 
 设计要点:
-- 使用自定义 DailyFileHandler,文件名直接含日期(非轮转后缀)
+- 使用纯 ASGI 中间件(非 BaseHTTPMiddleware),避免对 SSE 流式响应的缓冲
+- SSE 端点直接透传,不做任何拦截,确保实时推送
 - 排除健康检查/文档等无意义路径
-- SSE 流式端点不记录响应体(持续流,无法一次性读取)
 - 请求体/响应体超过 4KB 截断,防止日志膨胀
 - JSON 响应美化输出,便于人工阅读
 """
@@ -17,11 +17,6 @@ import threading
 import time
 from datetime import date, datetime
 from pathlib import Path
-from typing import Awaitable, Callable
-
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request
-from starlette.responses import Response
 
 # 日志目录(app/server/logs/)
 LOG_DIR = Path(__file__).resolve().parent / "logs"
@@ -29,7 +24,7 @@ LOG_DIR = Path(__file__).resolve().parent / "logs"
 # 不记录的路径(健康检查、文档、根路径)
 EXCLUDE_PATHS = {"/api/health", "/docs", "/redoc", "/openapi.json", "/"}
 
-# SSE 端点路径片段(流式响应,不记录响应体)
+# SSE 端点路径片段(流式响应,直接透传不拦截)
 SSE_PATH_MARKERS = ("/stream/",)
 
 # 请求体/响应体最大记录长度(字节)
@@ -136,67 +131,102 @@ def _safe_json_parse(raw: bytes) -> str:
         return text
 
 
-class APILoggingMiddleware(BaseHTTPMiddleware):
-    """记录所有 API 请求和响应的中间件.
+class APILoggingMiddleware:
+    """纯 ASGI 中间件:记录所有 API 请求和响应.
 
-    每条日志包含:时间戳、方法、路径、查询参数、客户端 IP、
-    状态码、耗时(ms)、请求体、响应体(JSON 美化)。
+    使用纯 ASGI 实现而非 BaseHTTPMiddleware,避免后者内部 channel
+    对 SSE 流式响应造成缓冲(导致前端实时进度不更新)。
+
+    SSE 端点(/stream/ 路径)直接透传,不做任何拦截。
+    非 SSE 端点通过包装 receive/send 捕获请求体和响应体用于日志。
     """
 
-    async def dispatch(
-        self,
-        request: Request,
-        call_next: Callable[[Request], Awaitable[Response]],
-    ) -> Response:
-        path = request.url.path
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        # 非 HTTP 请求(如 lifespan)直接透传
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        path = scope.get("path", "")
+
+        # 排除路径:直接透传
         if _is_excluded(path):
-            return await call_next(request)
+            await self.app(scope, receive, send)
+            return
 
-        # 读取请求体(需缓存后重新提供给下游路由)
-        req_body = await request.body()
+        # SSE 端点:直接透传,不做任何拦截(关键:避免缓冲流式响应)
+        if _is_sse(path):
+            await self.app(scope, receive, send)
+            return
 
-        async def receive():
-            return {"type": "http.request", "body": req_body, "more_body": False}
+        # ── 非 SSE 端点:捕获请求体和响应体用于日志 ──
 
-        request._receive = receive
+        method = scope.get("method", "")
+        query_string = scope.get("query_string", b"").decode("utf-8", errors="replace")
+        client = scope.get("client")
+        client_ip = client[0] if client else "-"
 
-        start = time.perf_counter()
-        response = await call_next(request)
-        duration_ms = (time.perf_counter() - start) * 1000
+        # 包装 receive:捕获请求体
+        req_body = b""
 
-        sse = _is_sse(path)
+        async def receive_wrapper():
+            nonlocal req_body
+            message = await receive()
+            if message["type"] == "http.request":
+                req_body += message.get("body", b"")
+            return message
+
+        # 包装 send:捕获响应状态和响应体
+        resp_status = 0
         resp_body = b""
-        if not sse:
-            # 非 SSE:读取响应体后重新构建 Response 返回给客户端
-            async for chunk in response.body_iterator:
-                resp_body += chunk
-            response = Response(
-                content=resp_body,
-                status_code=response.status_code,
-                headers=dict(response.headers),
-                media_type=response.media_type,
+
+        async def send_wrapper(message):
+            nonlocal resp_status, resp_body
+            if message["type"] == "http.response.start":
+                resp_status = message.get("status", 0)
+            elif message["type"] == "http.response.body":
+                resp_body += message.get("body", b"")
+            await send(message)
+
+        # 执行下游应用
+        start = time.perf_counter()
+        try:
+            await self.app(scope, receive_wrapper, send_wrapper)
+        except Exception:
+            # 异常也记录,然后重新抛出
+            duration_ms = (time.perf_counter() - start) * 1000
+            logger = get_api_logger()
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+            query_str = f"?{query_string}" if query_string else ""
+            req_text = _truncate(_safe_json_parse(req_body)) if req_body else ""
+            logger.info(
+                f"\n{'=' * 80}\n"
+                f"[{ts}] {method} {path}{query_str}\n"
+                f"  client: {client_ip}\n"
+                f"  status: ERROR  duration: {duration_ms:.1f}ms\n"
+                f"  request_body:\n{req_text}\n"
+                f"  response_body: [exception raised]"
             )
+            raise
+
+        duration_ms = (time.perf_counter() - start) * 1000
 
         # 组装并写入日志
         logger = get_api_logger()
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-        query = request.url.query
-        client_ip = request.client.host if request.client else "-"
+        query_str = f"?{query_string}" if query_string else ""
 
         req_text = _truncate(_safe_json_parse(req_body)) if req_body else ""
-        if sse:
-            resp_text = "[SSE stream, response body omitted]"
-        else:
-            resp_text = _truncate(_safe_json_parse(resp_body))
+        resp_text = _truncate(_safe_json_parse(resp_body))
 
-        query_str = f"?{query}" if query else ""
         logger.info(
             f"\n{'=' * 80}\n"
-            f"[{ts}] {request.method} {path}{query_str}\n"
+            f"[{ts}] {method} {path}{query_str}\n"
             f"  client: {client_ip}\n"
-            f"  status: {response.status_code}  duration: {duration_ms:.1f}ms\n"
+            f"  status: {resp_status}  duration: {duration_ms:.1f}ms\n"
             f"  request_body:\n{req_text}\n"
             f"  response_body:\n{resp_text}"
         )
-
-        return response

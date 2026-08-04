@@ -12,6 +12,7 @@ class AnalysisRequest(BaseModel):
 
     job_requirements(JD 正文)与 resume 必填,
     company_name 与 job_title 可选。
+    resume_id / resume_name / position_id / position_name 用于历史记录溯源。
     """
 
     company_name: str = ""
@@ -20,6 +21,9 @@ class AnalysisRequest(BaseModel):
     job_requirements: str
     resume: str
     resume_id: Optional[str] = None
+    resume_name: Optional[str] = None
+    position_id: Optional[str] = None
+    position_name: Optional[str] = None
 
 
 class ModelConfigRequest(BaseModel):
@@ -183,6 +187,7 @@ class AnalysisDetailResponse(BaseModel):
     result: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
     model: str = ""
+    metadata: Dict[str, Any] = {}
 
 
 class ExportRequest(BaseModel):

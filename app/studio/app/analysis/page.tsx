@@ -408,6 +408,7 @@ function AnalysisPageInner() {
     } catch {}
 
     try {
+      const selectedPos = positions.find((p) => p.id === selectedPositionId);
       const r: AnalysisResponse = await api.runAnalysis({
         company_name: companyName,
         company_business_scope: businessScope,
@@ -415,6 +416,9 @@ function AnalysisPageInner() {
         job_requirements: jobRequirements,
         resume: resumeSource.text,
         resume_id: resumeSource.kind === "selected" ? resumeSource.id : undefined,
+        resume_name: resumeSource.name,
+        position_id: selectedPositionId || undefined,
+        position_name: selectedPos ? selectedPos.name : undefined,
       });
       if (!r.success || !r.analysis_id) {
         setError(r.error || "分析启动失败");
