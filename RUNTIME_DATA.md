@@ -11,8 +11,8 @@
 ```
 .hiremind/
 ├── model_config.json      # 模型配置(供应商/模型/API Key/Base URL)
-├── sessions/              # Agent 会话存档(跨轮可恢复)
-│   └── session-<id>.json
+├── analyses/              # 分析记录(异步分析 + SSE 进度)
+│   └── analysis-<id>.json
 ├── runs/                  # 单次 ask() 运行审计(可选,默认不生成)
 │   └── <run_id>/
 │       ├── task_state.json
@@ -79,55 +79,57 @@
 
 ---
 
-### 2.2 `sessions/` — Agent 会话存档
+### 2.2 `analyses/` — 分析记录
 
-**用途**:存储 `HireMindAgent` 的会话状态,支持跨轮恢复。每次面试分析会创建独立 session。
+**用途**:存储分析记录,支持异步分析和 SSE 进度推送。替代了旧版的 sessions/ 目录。
 
 **生成时机**:
-- 调用 `POST /api/analysis/run` 时,`agent.reset()` 创建新 session
-- `agent.ask()` 完成后,`_record_history()` / `_finalize_run()` 保存
-- `tool_run_analysis` 执行后立即 `session_store.save()` 落盘
+- 调用 `POST /api/analysis/run` 时创建(`status=pending`)
+- 后台线程执行 LangGraph 流水线,每完成一个节点更新 `progress`
+- 完成后 `status` → `completed`
 
-**管理者**:`package/hiremind/session_store.py` 的 `SessionStore`
+**管理者**:`package/hiremind/analysis_store.py` 的 `AnalysisStore`
 
-**命名规则**:`session-<12位hex>.json`,如 `session-26270ec651cd.json`
+**命名规则**:`analysis-<12位hex>.json`,如 `analysis-a1b2c3d4e5f6.json`
 
 **文件结构**:
 
 ```json
 {
-  "id": "session-26270ec651cd",
-  "created_at": "2026-07-17T10:30:00",
-  "updated_at": "2026-07-17T10:35:20",
-  "title": "字节跳动 · 高级产品经理",
-  "history": [
-    { "role": "user", "content": "..." },
-    { "role": "assistant", "content": "..." }
-  ],
+  "id": "analysis-a1b2c3d4e5f6",
+  "title": "字节跳动-高级产品经理",
+  "model": "qwen3.7-plus",
+  "status": "completed",
+  "progress": {
+    "completed": [{"node": "parse_jd", "label": "解析JD"}],
+    "current": null
+  },
+  "interview_result": { ... },
+  "history": [...],
   "memory": { ... },
-  "interview_result": {
-    "match_analysis": { ... },
-    "business_scenarios": [ ... ],
-    "risks": [ ... ],
-    "interview_questions": [ ... ],
-    "preparation_tips": "..."
-  }
+  "error": null,
+  "created_at": "...",
+  "updated_at": "..."
 }
 ```
 
 | 字段 | 说明 |
 |---|---|
-| `id` | 会话唯一标识,12 位 hex |
-| `created_at` / `updated_at` | ISO 8601 时间戳 |
-| `title` | 自动生成,格式 `<公司> · <岗位>` |
+| `id` | 分析记录唯一标识,12 位 hex |
+| `title` | 自动生成,格式 `<公司>-<岗位>` |
+| `model` | 分析时使用的模型名 |
+| `status` | 状态:`pending` / `running` / `completed` / `error` / `cancelled` |
+| `progress` | SSE 进度推送(已完成的节点列表与当前节点) |
+| `interview_result` | 完整分析报告(匹配度/场景/风险/面试题/备考建议) |
 | `history` | 对话历史(`user` / `assistant` 交替) |
 | `memory` | 工作记忆快照(当前 JD / 简历 / 结果) |
-| `interview_result` | 完整分析报告(匹配度/场景/风险/面试题/备考建议) |
 
 **消费方**:
-- `GET /api/analysis/history` — 遍历过滤 `interview_result` 非空的会话
-- `GET /api/analysis/history/{id}` — 读取单个会话详情
-- `POST /api/interview/start` — 从 session 加载 `interview_result` 启动模拟面试
+- `GET /api/analyses` — 分析记录列表
+- `GET /api/analyses/{id}` — 读取单个分析详情
+- `DELETE /api/analyses/{id}` — 删除分析记录
+- `GET /api/analysis/stream/{id}` — SSE 进度流
+- `POST /api/interview/start` — 从 analysis 加载 `interview_result` 启动模拟面试
 
 ---
 
@@ -322,34 +324,39 @@ runs/<run_id>/
 ```json
 {
   "interview_id": "iv-19f3dfacdc5e",
-  "session_id": "session-26270ec651cd",
-  "status": "finished",               // started / answering / evaluated / finished
+  "analysis_id": "analysis-a1b2c3d4e5f6",
+  "status": "finished",
   "company_name": "字节跳动",
   "job_title": "高级产品经理",
   "max_turns": 8,
-  "turns": [
+  "turns": [...],
+  "stages": [
     {
-      "question": "第一题...",
-      "answer": "用户回答...",
-      "evaluation": {
-        "score": 85,
-        "highlights": "...",
-        "improvements": "...",
-        "analysis": "出题分析...",
-        "reference_answer": "参考答案..."
-      }
+      "stage_type": "written",
+      "stage_name": "笔试",
+      "status": "completed",
+      "turns": [...],
+      "stage_score": 78,
+      "stage_summary": "基础扎实...",
+      "promotion_hint": "建议进入技术一面",
+      "written_questions": [...]
     }
   ],
+  "stages_completed": 4,
+  "current_stage_index": 4,
+  "stage_configs": [...],
   "current_question": "...",
   "current_focus": "...",
   "turn_index": 8,
   "finished": true,
   "report": {
     "overall_score": 82,
+    "stages": [...],
+    "stages_completed": 4,
     "summary": "总体评价...",
     "strengths": ["..."],
-    "weaknesses": ["..."],
-    "learning_suggestions": "..."
+    "weak_areas": ["..."],
+    "learning_suggestions": ["..."]
   },
   "created_at": "...",
   "updated_at": "..."
@@ -361,6 +368,11 @@ runs/<run_id>/
 - `GET /api/interview/{id}/state` — 当前状态
 - `GET /api/interview/{id}/report` — 最终报告(含完整 turns)
 - `POST /api/interview/{id}/answer` / `next` / `finish` — 推进面试
+- `POST /interview/{id}/written/submit` — 提交笔试
+- `POST /interview/{id}/advance` — 推进到下一阶段
+- `POST /interview/{id}/abandon` — 放弃面试
+- `POST /interview/stages/recommend` — 推荐阶段配置
+- `DELETE /interview/{id}` — 删除面试记录
 
 ---
 
@@ -409,7 +421,7 @@ runs/<run_id>/
 | 数据类型 | 创建时机 | 创建者 |
 |---|---|---|
 | `model_config.json` | 设置页首次保存 | `Settings.persist()` |
-| `sessions/*.json` | `agent.reset()` 或 `agent.ask()` | `SessionStore.save()` |
+| `analyses/*.json` | `POST /api/analysis/run` | `AnalysisStore.save()` |
 | `runs/<id>/` | `RunStore.start_run()` | `RunStore` |
 | `memory/resumes/*.md` | 分析完成后 | `HireMindMemory.save_resume_version()` |
 | `memory/topics/*.md` | 分析完成或用户表达偏好 | `HireMindMemory.save_*()` |
@@ -424,7 +436,7 @@ runs/<run_id>/
 | 数据类型 | 读取方 |
 |---|---|
 | `model_config.json` | 后端启动时 `Settings` 初始化 |
-| `sessions/*.json` | `list_analysis_history` / `get_analysis_history_detail` / `start_interview` |
+| `analyses/*.json` | `list_analyses` / `get_analysis_detail` / `start_interview` / SSE stream |
 | `runs/<id>/` | 调试时人工查看(无 API 读取) |
 | `memory/` | Agent 启动时 `HireMindMemory.from_dict()` |
 | `resumes/*.json` | 简历 CRUD API |
@@ -437,7 +449,7 @@ runs/<run_id>/
 
 | 数据类型 | 删除时机 | 删除方 |
 |---|---|---|
-| `sessions/*.json` | 用户在历史记录页删除 / `DELETE /api/sessions/{id}` | `SessionStore.delete()` |
+| `analyses/*.json` | 历史记录页删除 / `DELETE /api/analyses/{id}` | `AnalysisStore.delete()` |
 | `resumes/*.json` | 用户在简历页删除 / `DELETE /api/resumes/{id}` | `ResumeStore.delete()` |
 | `positions/*.json` | 用户在职位页删除 / `DELETE /api/positions/{id}` | `PositionStore.delete()` |
 | `interviews/*.json` | 用户在历史记录页删除 / `DELETE /api/interview/{id}` | `InterviewStore.delete()` |
@@ -460,7 +472,7 @@ cp -r .hiremind/ .hiremind-backup-$(date +%Y%m%d)/
 ```
 
 **关键文件优先级**:
-- **必须备份**:`model_config.json`(含 API Key)、`resumes/`、`positions/`、`sessions/`(含分析报告)
+- **必须备份**:`model_config.json`(含 API Key)、`resumes/`、`positions/`、`analyses/`(含分析报告)
 - **建议备份**:`interviews/`、`memory/`、`assets/`
 - **可不备份**:`reports/`(可从 sessions 重新导出)、`runs/`(仅审计用)
 
@@ -498,3 +510,4 @@ rm -rf .hiremind/reports/
 
 - [README.md](./README.md) — 项目概览与功能介绍
 - [ARCHITECTURE.md](./ARCHITECTURE.md) — 架构设计、文件职责、API 设计、开发指南
+- [package/ARCHITECTURE.md](./package/ARCHITECTURE.md) — 核心包架构详解(模型/agent/tool/记忆/存储)

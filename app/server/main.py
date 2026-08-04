@@ -3,6 +3,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from .api_logger import APILoggingMiddleware
 from .config import settings
 from .routes import router
 
@@ -26,6 +27,7 @@ app = FastAPI(
     openapi_tags=openapi_tags,
 )
 
+# CORS(最先注册,最后执行:放行 OPTIONS 预检)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
@@ -33,6 +35,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# API 请求/响应日志(按天保存到 logs/api-access-YYYY-MM-DD.log)
+app.add_middleware(APILoggingMiddleware)
 
 app.include_router(router, prefix="/api")
 

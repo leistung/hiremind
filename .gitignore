@@ -6,6 +6,9 @@
 # HireMind 运行时数据(包含模型配置、API Key、简历、会话等)
 .hiremind/
 
+# API 请求日志(按天生成)
+app/server/logs/
+
 # Python
 __pycache__/
 *.py[cod]

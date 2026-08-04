@@ -122,9 +122,9 @@ HireMind 采用 **三层分层架构**,职责清晰隔离:
 
 | 文件 | 职责 | 关键类/函数 |
 |---|---|---|
-| `__init__.py` | 包入口,统一导出核心 API | `HireMindAgent` / `InterviewGraph` / `SessionStore` / `RunStore` / `TaskState` / `HireMindMemory` / `HireMindWorkspace` / `InterviewInput` / `InterviewResult` / `new_session` |
-| `runtime.py` | Agent 运行时控制循环:组 prompt → 调模型 → 解析 → 执行工具 → 写 trace → 更新记忆,循环至产出最终答案或命中停止条件 | `HireMindAgent`(`ask` / `run_tool` / `run_full_analysis` / `reset` / `from_session` / `_parse` / `_extract_json` / `_record_history` / `_finalize_run`) |
-| `session_store.py` | 跨轮可恢复会话的磁盘仓储,序列化到 `.hiremind/sessions/<id>.json`,支持原子写 | `SessionStore`(`save` / `load` / `latest` / `list_all` / `delete`)、`new_session` |
+| `__init__.py` | 包入口,统一导出核心 API | `HireMindAgent` / `InterviewGraph` / `AnalysisStore` / `RunStore` / `TaskState` / `HireMindMemory` / `HireMindWorkspace` / `InterviewInput` / `InterviewResult` / `new_analysis` |
+| `runtime.py` | Agent 运行时控制循环:组 prompt → 调模型 → 解析 → 执行工具 → 写 trace → 更新记忆,循环至产出最终答案或命中停止条件 | `HireMindAgent`(`ask` / `run_tool` / `run_full_analysis` / `reset` / `from_analysis` / `_parse` / `_extract_json` / `_record_history` / `_finalize_run`) |
+| `analysis_store.py` | 分析记录的磁盘仓储,序列化到 `.hiremind/analyses/<id>.json`,替代旧版 session_store | `AnalysisStore`(`save` / `load` / `latest` / `list_all` / `delete`)、`new_analysis` |
 | `run_store.py` | 单次 ask() 运行的审计工件落盘器,每个 run 独立目录 | `RunStore`(`start_run` / `write_task_state` / `append_trace` / `write_report`) |
 | `task_state.py` | 单次 ask() 的状态机快照,记录运行进度/工具步数/停止原因 | `TaskState`(`create` / `record_attempt` / `record_tool` / `finish_success` / `stop_*`) |
 | `context_manager.py` | 上下文提示词组装与预算控制,按 section 预算组装并按 reduction_order 压缩 | `InterviewContextManager`(`build` / `_render_sections` / `_assemble_prompt`) |
@@ -146,6 +146,8 @@ START ──┬──> parse_jd ─────┬──> analyze_match ──�
         └──> parse_resume ──┘
 ```
 
+InterviewGraph 提供两个执行入口:`run(input)` 一次性执行返回 InterviewResult;`stream_run(input)` 流式执行,逐节点 yield `(node_name, label, partial_state)`,用于异步分析的 SSE 进度推送。
+
 #### `nodes/` 图节点
 
 | 文件 | 职责 | 输出模型 |
@@ -161,10 +163,10 @@ START ──┬──> parse_jd ─────┬──> analyze_match ──�
 
 #### `prompts/` 提示词模板
 
-`templates.py` 定义 12 个 `ChatPromptTemplate`:
+`templates.py` 定义 17 个 `ChatPromptTemplate`:
 - 分析流程:`JD_PARSER_PROMPT` / `RESUME_PARSER_PROMPT` / `MATCH_ANALYSIS_PROMPT` / `SCENARIO_BUILDER_PROMPT` / `RISK_IDENTIFIER_PROMPT` / `QUESTION_GENERATOR_PROMPT` / `PREPARATION_TIPS_PROMPT`
 - 简历结构化:`RESUME_STRUCTURE_PROMPT`
-- 模拟面试:`INTERVIEW_FIRST_QUESTION_PROMPT` / `INTERVIEW_EVALUATE_PROMPT` / `INTERVIEW_NEXT_QUESTION_PROMPT` / `INTERVIEW_FINAL_REPORT_PROMPT`
+- 模拟面试:`INTERVIEW_FIRST_QUESTION_PROMPT` / `INTERVIEW_EVALUATE_PROMPT` / `INTERVIEW_NEXT_QUESTION_PROMPT` / `INTERVIEW_FINAL_REPORT_PROMPT` / `WRITTEN_EXAM_GENERATOR_PROMPT`(笔试批量出题)/ `WRITTEN_BATCH_EVALUATE_PROMPT`(笔试批量评价)/ `STAGE_SUMMARY_PROMPT`(阶段总结)/ `STAGE_FIRST_QUESTION_PROMPT`(对话阶段首题)/ `STAGE_PLANNER_PROMPT`(智能阶段规划)
 
 #### `services/` 业务服务
 
@@ -174,7 +176,7 @@ START ──┬──> parse_jd ─────┬──> analyze_match ──�
 | `document_parser.py` | PDF/Word 解析为 Markdown,首选 docling(OCR 关闭),失败按格式降级 | `parse_document(source)` |
 | `export_service.py` | 面试分析报告导出:`InterviewResult` → Word/PDF | `generate_word(result)` / `generate_pdf(result)` |
 | `resume_service.py` | 简历与职位 CRUD + 简历结构化解析 + 模板化导出(3 套模板,支持头像嵌入) | `ResumeStore` / `PositionStore` / `parse_resume_text_to_structured` / `export_resume_word` / `export_resume_pdf` / `TEMPLATES` |
-| `interview_service.py` | 模拟面试运行时:自适应提问/即时评价/最终报告,状态机 started→answering→evaluated→finished | `MockInterview` / `InterviewStore` / `new_interview` |
+| `interview_service.py` | 多阶段模拟面试(笔试批量+对话逐题+软晋级)/单阶段兼容,状态机 started→answering→evaluated→finished/abandoned,智能阶段规划 recommend_stage_configs | `MockInterview` / `InterviewStore` / `new_interview` / `recommend_stage_configs` |
 
 #### `models/` 数据模型
 
@@ -183,7 +185,8 @@ START ──┬──> parse_jd ─────┬──> analyze_match ──�
 - 职位:`Position`
 - 面试分析:`InterviewInput` / `JDProfile` / `ResumeProfile` / `MatchAnalysis` / `BusinessScenario` / `Risk` / `Question` / `InterviewRound` / `InterviewQuestions` / `InterviewResult`
 - LangGraph 状态:`InterviewState`(含 `_merge_errors` reducer)
-- 模拟面试:`InterviewTurn` / `InterviewReport`
+- 多阶段面试:`InterviewStageType`(枚举:written/tech_1/tech_2/system_design/behavioral/hr/boss)/ `StageConfig`/ `InterviewStageTurn`/ `InterviewReport`(扩展 stages 字段)
+- 模拟面试:`InterviewTurn` / `InterviewStageTurn` / `InterviewReport`(含 stages 字段)
 
 ---
 
@@ -239,7 +242,7 @@ START ──┬──> parse_jd ─────┬──> analyze_match ──�
 
 ### 4.1 路由总览
 
-共 **35 个路由**,挂载在 `/api` 前缀下。按功能模块分组:
+共 **43 个路由**,挂载在 `/api` 前缀下。按功能模块分组:
 
 #### 健康检查
 | 方法 | 路径 | 功能 |
@@ -291,30 +294,30 @@ START ──┬──> parse_jd ─────┬──> analyze_match ──�
 | POST | `/chat` | Agent 对话(可指定 session_id 恢复) |
 | POST | `/chat/new-session` | 重置 agent 创建新会话 |
 
-#### 历史记录
+#### 分析记录
 | 方法 | 路径 | 功能 |
 |---|---|---|
-| GET | `/analysis/history` | 所有分析报告摘要(mtime 倒序) |
-| GET | `/analysis/history/{session_id}` | 单个分析报告详情 |
-| GET | `/interview/{interview_id}/report` | 模拟面试最终报告(含完整 turns) |
-
-#### 会话管理
-| 方法 | 路径 | 功能 |
-|---|---|---|
-| GET | `/sessions` | 所有会话摘要 |
-| GET | `/sessions/{id}` | 单个会话完整数据 |
-| DELETE | `/sessions/{id}` | 删除会话 |
+| GET | `/analyses` | 所有分析记录摘要(mtime 倒序,含 status/score) |
+| GET | `/analyses/{analysis_id}` | 单个分析记录详情(含 status + result) |
+| DELETE | `/analyses/{analysis_id}` | 删除分析记录(同步删除 JSON 文件) |
+| POST | `/analyses/{analysis_id}/cancel` | 取消进行中的分析 |
+| GET | `/analysis/stream/{analysis_id}` | SSE 实时推送分析进度(7 阶段) |
 
 #### 模拟面试
 | 方法 | 路径 | 功能 |
 |---|---|---|
-| POST | `/interview/start` | 基于分析报告启动面试,生成第一题 |
-| POST | `/interview/{id}/answer` | 提交回答,返回即时评价 |
+| POST | `/interview/stages/recommend` | 智能生成阶段方案(LLM 根据岗位/公司/薪资) |
+| POST | `/interview/start` | 启动面试(支持 stages 参数多阶段配置) |
+| POST | `/interview/{id}/answer` | 提交回答(对话阶段),返回即时评价 |
 | POST | `/interview/{id}/next` | 生成下一题(若结束自动生成报告) |
+| POST | `/interview/{id}/written/submit` | 笔试批量提交答案 |
+| POST | `/interview/{id}/advance` | 阶段推进(确认晋级下一阶段) |
 | POST | `/interview/{id}/finish` | 主动结束,生成最终报告 |
+| POST | `/interview/{id}/abandon` | 放弃面试(不生成报告) |
 | GET | `/interview/{id}/state` | 查询面试当前状态 |
+| GET | `/interview/{id}/report` | 获取最终报告(含完整 turns + stages) |
 | GET | `/interview` | 所有面试记录 |
-| DELETE | `/interview/{id}` | 删除面试记录 |
+| DELETE | `/interview/{id}` | 删除面试记录(同步删除 JSON 文件) |
 
 #### 导出
 | 方法 | 路径 | 功能 |
@@ -325,9 +328,9 @@ START ──┬──> parse_jd ─────┬──> analyze_match ──�
 
 ### 4.2 路由设计原则
 
-1. **同步路由优先**:LLM 调用路由用 `def`(非 `async def`),FastAPI 自动放线程池,避免阻塞事件循环
+1. **异步分析模式**:LLM 分析改为后台线程执行,POST /analysis/run 立即返回 analysis_id,通过 SSE 推送进度
 2. **async def 仅用于 UploadFile**:需要 `await file.read()` 的路由保持 async,但 LLM 调用用 `asyncio.to_thread()` 包装
-3. **独立 session**:每次 `run_analysis` 调用 `agent.reset()` 创建独立 session,避免覆盖历史记录
+3. **独立 analysis**:每次 `run_analysis` 创建独立 analysis 记录,避免覆盖历史记录
 4. **错误吞没防护**:`run_tool` 内部 try/except 会把异常转为错误字符串,路由层需检查 `interview_result` 是否为 None 判断真实成功与否
 5. **响应模型对齐**:`response_model` 显式声明的路由,FastAPI 自动生成 JSON Schema,前端 `types.ts` 与之对齐
 
@@ -385,7 +388,7 @@ app/studio/app/
 
 | 接口 | 超时 | 机制 |
 |---|---|---|
-| `/analysis/run` | 10 分钟 | `AbortController` + 直连后端 8000 端口 |
+| `/analysis/run` | 异步任务模式 | 立即返回 analysis_id + SSE 流式推送进度 |
 | `/resumes/upload-parse` | 5 分钟 | `AbortController` |
 | `/interview/*` | 默认(fetch 无超时) | LLM 调用较快,通常 < 30 秒 |
 | 其他 CRUD | 默认 | 快速响应,无需超时控制 |
@@ -406,17 +409,19 @@ app/studio/app/
   │
   ▼
 后端 routes.py:run_analysis
-  ├─ agent.reset()  (创建独立 session)
-  └─ agent.run_full_analysis(...)
+  ├─ AnalysisStore.save(status=pending)  (创建独立 analysis 记录)
+  ├─ 启动后台线程执行 agent.run_full_analysis(...)
+  └─ 立即返回 analysis_id
        │
        ▼
-     tools.py:tool_run_analysis
+     后台线程:tools.py:tool_run_analysis
        ├─ 构造 InterviewInput
-       ├─ agent.graph.run(input)  ─────────┐
+       ├─ agent.graph.stream_run(input)  ─────────┐
+       │   逐节点 yield (node_name, label, partial_state)
        │                                    │
        │   ┌────────────────────────────────┘
        │   ▼
-       │  InterviewGraph.run()
+       │  InterviewGraph.stream_run()
        │   ├─ parse_jd          (LLM 结构化 JD)
        │   ├─ parse_resume      (LLM 结构化简历,参考 JD)
        │   ├─ analyze_match     (并行,匹配度分析)
@@ -426,15 +431,19 @@ app/studio/app/
        │   └─ generate_tips     (备考建议)
        │       │
        │       └─ 每个节点:prompts.XXX | llm.with_structured_output(Schema)
+       │       └─ 每完成一个节点 → SSE 推送进度 → 前端实时更新
        │
-       ├─ 写 agent.session["interview_result"]
-       ├─ session_store.save()  (落盘 .hiremind/sessions/)
+       ├─ 写 agent.analysis["interview_result"]
+       ├─ analysis_store.save()  (落盘 .hiremind/analyses/)
        ├─ memory.set_current_result()  (更新工作记忆)
        ├─ memory.save_resume_version()  (持久化简历版本)
        └─ memory.save_interview_summary()  (持久化面试摘要)
   │
   ▼
-返回 AnalysisResponse(success/result/session_id)
+前端 GET /api/analysis/stream/{analysis_id}  (SSE 实时接收进度)
+  │
+  ▼
+返回 AnalysisResponse(success/result/analysis_id)
   │
   ▼
 前端展示报告 + 可选导出 Word/PDF
@@ -443,29 +452,34 @@ app/studio/app/
 ### 6.2 模拟面试流程
 
 ```
-用户在 /interview 页面输入 session_id + 选轮数
+用户在 /interview 页面:可选 POST /interview/stages/recommend 智能生成阶段方案
   │
   ▼
-前端 POST /api/interview/start
+前端 POST /api/interview/start(支持 stages 参数多阶段配置)
   │
   ▼
-后端:从 session 加载 interview_result → MockInterview.start() → 生成第一题
+后端:MockInterview.start() → 按阶段方案生成第一题(笔试或对话)
   │
   ▼
-循环:
+笔试阶段:
+  前端 POST /interview/{id}/written/submit { answers }
+    → MockInterview.submit_written() → 批量评价(评分/亮点/改进点)
+  │
+  ▼
+对话阶段循环:
   前端 POST /interview/{id}/answer { answer }
     → MockInterview.submit_answer() → 即时评价(评分/亮点/改进点)
   前端 POST /interview/{id}/next
     → MockInterview.next_question()
     → 若未结束:返回下一题
-    → 若结束(返回 __INTERVIEW_FINISHED__):自动生成最终报告
+    → 若阶段结束:可 POST /interview/{id}/advance 推进至下一阶段
   │
   ▼
-或用户主动 POST /interview/{id}/finish
-  → MockInterview.finish() → 最终报告
+或用户主动 POST /interview/{id}/finish → 生成最终报告(含 stages)
+或用户 POST /interview/{id}/abandon → 放弃面试(不生成报告)
   │
   ▼
-前端展示最终报告(总分/总评/优势/薄弱/学习建议)
+前端展示最终报告(总分/总评/优势/薄弱/学习建议/各阶段表现)
 ```
 
 ---
@@ -573,3 +587,4 @@ FastAPI 的 `async def` 路由在事件循环中执行,调用同步 LLM SDK(如 
 
 - [README.md](./README.md) — 项目概览与功能介绍
 - [RUNTIME_DATA.md](./RUNTIME_DATA.md) — `.hiremind/` 运行时数据目录说明
+- [package/ARCHITECTURE.md](./package/ARCHITECTURE.md) — 核心包架构详解(模型/agent/tool/记忆/存储)

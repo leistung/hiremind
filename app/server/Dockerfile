@@ -20,6 +20,11 @@ RUN pip install --no-cache-dir \
         --retries 5 \
         -r requirements.txt
 
+# 中文字体: 用于 PDF 导出(fpdf2 需要)
+# 放在 pip install 之后,避免字体层变动使耗时的 pip install 缓存失效
+# 直接 COPY 到 _find_cjk_font() 候选路径,避免 apt 安装 fontconfig 时缓存重建卡死构建
+COPY app/server/fonts/wqy-zenhei.ttc /usr/share/fonts/truetype/wqy/wqy-zenhei.ttc
+
 # 拷贝应用层代码与核心业务包
 # package/ 通过 app/server/config.py 加入 sys.path
 COPY app/ ./app/

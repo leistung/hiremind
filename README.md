@@ -60,18 +60,22 @@ START ──┬──> 解析 JD ──────┬──> 匹配度分析 �
 - **状态持久化**:分析中切换页面,返回后自动恢复进度(轮询后端 6 分钟)
 - **停止分析**:支持中途停止,保留表单输入便于重新调整
 - **结果作废**:修改任何输入(职位 / 简历 / JD)自动清空旧结果,按钮回到「开始分析」
-- **历史归档**:每次分析独立 session,落盘到 `.hiremind/sessions/`,可在历史记录页查看
+- **历史归档**:每次分析独立 analysis 记录,落盘到 `.hiremind/analyses/`,可在历史记录页查看
+- **实时进度**:7 阶段进度条(解析JD → 解析简历 → 匹配度 → 业务场景 → 风险点 → 出题 → 准备建议),通过 SSE 实时推送
 
 ### 4. AI 模拟面试 `/interview`
 
-基于分析报告启动一场多轮模拟面试,LLM 扮演面试官自适应提问。
+基于分析报告启动一场**多阶段**模拟面试,模仿大厂真实面试流程(笔试 → 技术一面 → 技术二面 → 人事面)。
 
-- **启动方式**:基于某次分析报告启动,或粘贴 session_id
-- **轮数可选**:5 / 8 / 10 / 12 轮
-- **自适应提问**:根据前序回答调整后续问题难度与方向
-- **即时评价**:每轮回答后给出评分、亮点、改进点,附出题分析与参考答案(折叠展示)
-- **最终报告**:总分环、总体评价、优势总结、薄弱环节、学习建议
-- **中断恢复**:面试状态持久化,支持中断后继续
+- **启动方式**:基于某次分析报告启动,或粘贴 analysis_id
+- **智能阶段规划**:LLM 根据岗位/公司/薪资自动生成阶段方案(2-6 轮),每轮含阶段类型、题数、考察侧重、安排理由
+- **7 种阶段类型**:笔试(written)/ 技术一面(tech_1)/ 技术二面(tech_2)/ 系统设计(system_design)/ 行为面(behavioral)/ 人事面(hr)/ 老板面(boss)
+- **笔试批量模式**:笔试阶段一次性生成 5-20 题,批量提交后批量评价
+- **对话逐题模式**:技术/行为/人事阶段逐题交互,每题即时评分(0-10)+ 亮点 + 改进点
+- **软晋级机制**:每阶段完成后生成阶段得分(0-100)+ 评语 + 晋级提示,用户确认后推进(不淘汰)
+- **最终报告**:综合评分环、分阶段成绩、总体评价、优势总结、薄弱环节、学习建议
+- **中断恢复**:面试状态持久化(sessionStorage),支持切换页面后恢复
+- **放弃面试**:支持中途放弃(abandoned 状态),不生成报告
 
 ### 5. 历史记录 `/history`
 
@@ -79,8 +83,8 @@ START ──┬──> 解析 JD ──────┬──> 匹配度分析 �
 - **左侧列表**:卡片式展示,含分数徽章、公司-职位、轮数、相对时间
 - **右侧详情**:
   - 面试分析 Tab:完整分析报告(匹配度、场景、风险、面试题、备考建议)
-  - 模拟面试 Tab:对话流回放(每一轮问答 + AI 评价)+ 最终报告
-- **快速操作**:模拟面试详情页可直接跳转继续面试
+  - 模拟面试 Tab:对话流回放(每一轮问答 + AI 评价)+ 分阶段成绩 + 最终报告
+- **删除记录**:每条记录卡片 hover 显示删除按钮,确认后删除(前后端同步删除 JSON 文件)
 
 ### 6. 设置 `/settings`
 
@@ -107,11 +111,11 @@ START ──┬──> 解析 JD ──────┬──> 匹配度分析 �
 | **前端** | Next.js 15 App Router + React 19 | 全客户端渲染,无 Server Components |
 | **样式** | Tailwind CSS v4 + CSS 变量 | 暖色文档风(Notion-like) |
 | **类型** | TypeScript 5.7 严格模式 | `@/*` 路径别名 |
-| **后端** | FastAPI + Uvicorn | 35 个路由,同步路由 + 线程池 |
-| **Agent 框架** | LangGraph + LangChain | StateGraph DAG + 工具调用 |
+| **后端** | FastAPI + Uvicorn | 43 个路由,异步分析 + SSE 进度推送 |
+| **Agent 框架** | LangGraph + LangChain | StateGraph DAG + 工具调用 + 流式执行 |
 | **LLM 接入** | OpenAI 兼容 / Anthropic | 默认阿里云百炼 qwen3.7-plus |
 | **文档解析** | docling + PyMuPDF + python-docx | 多级降级 |
-| **导出** | python-docx + fpdf2 | Word + PDF,自动查找中文字体 |
+| **导出** | python-docx + fpdf2 | Word + PDF,3 套模板独立版式,自动查找中文字体 |
 | **数据校验** | Pydantic v2 | 前后端 schema 对齐 |
 | **存储** | 本地文件系统(JSON / Markdown) | 无数据库依赖 |
 
@@ -180,17 +184,21 @@ hiremind/
 │       ├── components/     # 共享组件(Sidebar / ResumePreview)
 │       └── lib/            # api.ts / types.ts / utils.ts
 ├── package/                # 核心业务包
-│   └── hiremind/
-│       ├── graph/          # LangGraph 工作流定义
-│       ├── nodes/          # 图节点(JD 解析、匹配分析等)
-│       ├── prompts/        # 提示词模板
-│       ├── services/       # 业务服务(LLM、解析、导出、简历、面试)
-│       ├── models/         # Pydantic 数据模型
-│       ├── runtime.py      # Agent 运行时
-│       ├── session_store.py # 会话存储
-│       ├── memory.py       # 分层记忆系统
-│       ├── tools.py        # 工具集
-│       └── workspace.py    # 工作区管理
+│   ├── hiremind/
+│   │   ├── graph/          # LangGraph 工作流定义(含流式执行)
+│   │   ├── nodes/          # 图节点(JD 解析、匹配分析等)
+│   │   ├── prompts/        # 17 个提示词模板
+│   │   ├── services/       # 业务服务(LLM、解析、导出、简历、多阶段面试)
+│   │   ├── models/         # Pydantic 数据模型(含多阶段面试模型)
+│   │   ├── runtime.py      # Agent 运行时
+│   │   ├── analysis_store.py # 分析记录存储(替代旧版 session_store)
+│   │   ├── memory.py       # 分层记忆系统
+│   │   ├── tools.py        # 工具集(含流式进度回调)
+│   │   └── workspace.py    # 工作区管理
+│   ├── ARCHITECTURE.md     # 核心包架构详解(模型/agent/tool/记忆/存储)
+│   └── PACKAGE_GUIDE.md    # 核心包使用指南
+├── docs/                   # 设计文档
+│   └── multi-stage-interview-design.md
 ├── scripts/                # 诊断脚本
 ├── .hiremind/              # 运行时数据(gitignore,详见 RUNTIME_DATA.md)
 ├── requirements.txt        # Python 依赖
@@ -198,7 +206,7 @@ hiremind/
 └── .gitignore
 ```
 
-详细架构说明见 [ARCHITECTURE.md](./ARCHITECTURE.md),运行时数据目录说明见 [RUNTIME_DATA.md](./RUNTIME_DATA.md)。
+详细架构说明见 [ARCHITECTURE.md](./ARCHITECTURE.md),核心包架构详解见 [package/ARCHITECTURE.md](./package/ARCHITECTURE.md),运行时数据目录说明见 [RUNTIME_DATA.md](./RUNTIME_DATA.md)。
 
 ---
 
@@ -208,27 +216,23 @@ hiremind/
 
 `HireMindAgent` 是模型外围的控制循环(组 prompt → 调模型 → 解析 → 执行工具 → 写 trace),`InterviewGraph` 是单次完整分析的固定 DAG 工作流,二者通过 `tool_run_analysis` 工具桥接。这样既保留了 Agent 的灵活性(可多轮对话、可调用工具),又保证了分析流程的确定性(7 个节点按拓扑顺序执行)。
 
-### 2. 分层记忆系统
+### 2. 多阶段模拟面试
 
-- **Working Memory**:随 session 存活,记录当前 JD / 简历 / 分析结果
-- **Durable Memory**:落盘到 `.hiremind/memory/`,跨 session 保留简历版本、岗位偏好、技能笔记、面试摘要
+模仿大厂真实流程:笔试(批量出题/批量提交)→ 技术一面 → 技术二面 → 人事面。LLM 根据岗位/公司/薪资智能规划阶段方案,每阶段独立评分 + 软晋级(不淘汰),最终报告含分阶段成绩。详见 [package/ARCHITECTURE.md](./package/ARCHITECTURE.md) 第六节。
+
+### 3. 分层记忆系统
+
+- **Working Memory**:随 analysis 存活,记录当前 JD / 简历 / 分析结果
+- **Durable Memory**:落盘到 `.hiremind/memory/`,跨 analysis 保留简历版本、岗位偏好、技能笔记、面试摘要
 - **召回机制**:基于 tag 精确匹配 + 关键词重叠排序,无 embedding 依赖
 
-### 3. 三层存储
+### 4. 异步分析 + SSE 实时进度
 
-| 层 | 路径 | 用途 |
-|---|---|---|
-| Sessions | `.hiremind/sessions/` | 跨轮会话恢复 |
-| Runs | `.hiremind/runs/` | 单次 ask() 审计(task_state / trace / report) |
-| Memory | `.hiremind/memory/` | 跨 session 长期记忆 |
-
-### 4. 长耗时请求处理
-
-LLM 分析需 2-5 分钟,通过以下机制保证可用性:
-- 后端同步路由(`def`)让 FastAPI 自动放线程池,不阻塞事件循环
-- 前端直连后端 8000 端口,绕过 Next.js 代理 30 秒超时
-- `AbortController` 设置 10 分钟超时
-- 分析中切换页面,返回后轮询后端恢复进度
+LLM 分析需 2-5 分钟,采用异步任务模式:
+- `POST /analysis/run` 立即返回 analysis_id,后台线程执行 LangGraph 流水线
+- 每完成一个节点,进度写入 analysis 文件
+- `GET /analysis/stream/{id}` SSE 端点轮询进度,实时推送给前端(7 阶段:解析JD → 解析简历 → 匹配度 → 业务场景 → 风险点 → 出题 → 准备建议)
+- 前端 `streamAnalysis` API 处理 SSE 事件,支持 abort 清理
 
 ### 5. 暖色文档风 UI
 

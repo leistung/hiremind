@@ -34,6 +34,46 @@ export default function HistoryPage() {
   const [loadingInterview, setLoadingInterview] = useState(false);
 
   const [loadingList, setLoadingList] = useState(false);
+  // 待删除项(用于确认弹窗)
+  const [pendingDelete, setPendingDelete] = useState<{ type: Tab; id: string; title: string } | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
+
+  // 删除记录
+  async function handleDelete() {
+    if (!pendingDelete) return;
+    setDeleting(true);
+    setDeleteError("");
+    try {
+      if (pendingDelete.type === "analysis") {
+        await api.deleteAnalysis(pendingDelete.id);
+        // 清除选中状态
+        if (selectedAnalysisId === pendingDelete.id) {
+          setSelectedAnalysisId("");
+          setAnalysisDetail(null);
+        }
+        // 刷新列表
+        const r = await api.listAnalyses();
+        setAnalysisItems(r.analyses || []);
+      } else {
+        await api.deleteInterview(pendingDelete.id);
+        if (selectedInterviewId === pendingDelete.id) {
+          setSelectedInterviewId("");
+          setInterviewDetail(null);
+        }
+        const r = await api.listInterviews();
+        setInterviewItems(r.interviews || []);
+      }
+      setPendingDelete(null);
+    } catch (err) {
+      // 删除失败时保留弹窗,显示错误,让用户重试或取消
+      setDeleteError(
+        err instanceof Error ? err.message : "删除失败,请检查后端服务后重试"
+      );
+    } finally {
+      setDeleting(false);
+    }
+  }
 
   // 拉取列表
   useEffect(() => {
@@ -132,13 +172,20 @@ export default function HistoryPage() {
                 <EmptyHint text="还没有分析报告" href="/analysis" cta="去生成第一份报告 →" />
               ) : (
                 analysisItems.map((it) => (
-                  <AnalysisListCard
-                    key={it.id}
-                    item={it}
-                    active={selectedAnalysisId === it.id}
-                    onClick={() => setSelectedAnalysisId(it.id)}
-                  />
-                ))
+                <AnalysisListCard
+                  key={it.id}
+                  item={it}
+                  active={selectedAnalysisId === it.id}
+                  onClick={() => setSelectedAnalysisId(it.id)}
+                  onDelete={() =>
+                    setPendingDelete({
+                      type: "analysis",
+                      id: it.id,
+                      title: `${it.company_name || "未指定公司"} · ${it.job_title || "未指定岗位"}`,
+                    })
+                  }
+                />
+              ))
               )
             ) : interviewItems.length === 0 ? (
               <EmptyHint text="还没有模拟面试记录" href="/interview" cta="去开启一场面试 →" />
@@ -149,6 +196,13 @@ export default function HistoryPage() {
                   item={it}
                   active={selectedInterviewId === it.id}
                   onClick={() => setSelectedInterviewId(it.id)}
+                  onDelete={() =>
+                    setPendingDelete({
+                      type: "interview",
+                      id: it.id,
+                      title: `${it.company_name || "未指定公司"} · ${it.job_title || "未指定岗位"}`,
+                    })
+                  }
                 />
               ))
             )}
@@ -190,6 +244,63 @@ export default function HistoryPage() {
           )}
         </div>
       </div>
+
+      {/* 删除确认弹窗 */}
+      {pendingDelete && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center"
+          style={{ background: "rgba(28, 25, 23, 0.4)" }}
+          onClick={() => {
+            if (!deleting) {
+              setPendingDelete(null);
+              setDeleteError("");
+            }
+          }}
+        >
+          <div
+            className="w-[400px] rounded-xl shadow-xl p-6"
+            style={{ background: "var(--bg-elevated)" }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-[16px] font-semibold text-stone-800 mb-2">确认删除</h3>
+            <p className="text-[13px] text-stone-600 leading-relaxed mb-1">
+              确定要删除这条{pendingDelete.type === "analysis" ? "面试分析" : "模拟面试"}记录吗?
+            </p>
+            <p className="text-[12px] text-stone-400 truncate mb-3">{pendingDelete.title}</p>
+            <p className="text-[11px] text-stone-400 mb-3">
+              删除后后端对应的 JSON 文件也会一并删除,操作不可恢复。
+            </p>
+            {deleteError && (
+              <p
+                className="text-[11px] mb-3 px-2 py-1.5 rounded"
+                style={{ background: "var(--danger-soft)", color: "var(--danger)" }}
+              >
+                {deleteError}
+              </p>
+            )}
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => {
+                  setPendingDelete(null);
+                  setDeleteError("");
+                }}
+                disabled={deleting}
+                className="btn btn-secondary"
+              >
+                取消
+              </button>
+              <button
+                onClick={handleDelete}
+                disabled={deleting}
+                className="btn btn-primary"
+                style={{ background: "var(--danger)" }}
+              >
+                {deleting ? "删除中…" : "确认删除"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -294,10 +405,12 @@ function AnalysisListCard({
   item,
   active,
   onClick,
+  onDelete,
 }: {
   item: AnalysisSummary;
   active: boolean;
   onClick: () => void;
+  onDelete: () => void;
 }) {
   const score = item.match_score || 0;
   const sc = scoreColor(score);
@@ -308,14 +421,24 @@ function AnalysisListCard({
   const isCancelled = item.status === "cancelled";
 
   return (
-    <button
+    <div
       onClick={onClick}
-      className="w-full text-left p-3 rounded-lg mb-2 transition-all"
+      className="group w-full text-left p-3 rounded-lg mb-2 transition-all cursor-pointer relative"
       style={{
         background: active ? "var(--bg-elevated)" : "transparent",
         border: active ? "1px solid var(--accent)" : "1px solid transparent",
       }}
     >
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          onDelete();
+        }}
+        className="absolute right-2 top-2 opacity-0 group-hover:opacity-100 transition-opacity text-[10px] text-stone-400 hover:text-red-500 px-1.5 py-0.5 rounded"
+        title="删除该记录"
+      >
+        删除
+      </button>
       <div className="flex items-start gap-3">
         <div
           className="w-10 h-10 rounded-lg shrink-0 flex flex-col items-center justify-center"
@@ -334,7 +457,7 @@ function AnalysisListCard({
             </>
           )}
         </div>
-        <div className="flex-1 min-w-0">
+        <div className="flex-1 min-w-0 pr-12">
           <div className="text-[13px] font-medium text-stone-800 truncate">
             {item.company_name || item.title || "未指定公司"} · {item.job_title || "未指定岗位"}
           </div>
@@ -356,7 +479,7 @@ function AnalysisListCard({
           </div>
         </div>
       </div>
-    </button>
+    </div>
   );
 }
 
@@ -366,10 +489,12 @@ function InterviewListCard({
   item,
   active,
   onClick,
+  onDelete,
 }: {
   item: InterviewListItem;
   active: boolean;
   onClick: () => void;
+  onDelete: () => void;
 }) {
   const finished = item.status === "finished";
   const abandoned = item.status === "abandoned";
@@ -379,14 +504,24 @@ function InterviewListCard({
     sc === "success" ? "var(--success)" : sc === "warning" ? "var(--warning)" : "var(--danger)";
 
   return (
-    <button
+    <div
       onClick={onClick}
-      className="w-full text-left p-3 rounded-lg mb-2 transition-all"
+      className="group w-full text-left p-3 rounded-lg mb-2 transition-all cursor-pointer relative"
       style={{
         background: active ? "var(--bg-elevated)" : "transparent",
         border: active ? "1px solid var(--accent)" : "1px solid transparent",
       }}
     >
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          onDelete();
+        }}
+        className="absolute right-2 top-2 opacity-0 group-hover:opacity-100 transition-opacity text-[10px] text-stone-400 hover:text-red-500 px-1.5 py-0.5 rounded"
+        title="删除该记录"
+      >
+        删除
+      </button>
       <div className="flex items-start gap-3">
         <div
           className="w-10 h-10 rounded-lg shrink-0 flex flex-col items-center justify-center"
@@ -406,7 +541,7 @@ function InterviewListCard({
             <span className="text-[10px] font-semibold">进行中</span>
           )}
         </div>
-        <div className="flex-1 min-w-0">
+        <div className="flex-1 min-w-0 pr-12">
           <div className="text-[13px] font-medium text-stone-800 truncate">
             {item.company_name || "未指定公司"} · {item.job_title || "未指定岗位"}
           </div>
@@ -417,7 +552,7 @@ function InterviewListCard({
           </div>
         </div>
       </div>
-    </button>
+    </div>
   );
 }
 

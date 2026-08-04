@@ -356,7 +356,7 @@ def export_resume_word(resume: Resume) -> bytes:
 
 
 def export_resume_pdf(resume: Resume) -> bytes:
-    """导出简历为 PDF."""
+    """导出简历为 PDF,按模板分派不同版式(与前端预览一致)."""
     try:
         from fpdf import FPDF, XPos, YPos
     except ImportError as exc:
@@ -367,68 +367,84 @@ def export_resume_pdf(resume: Resume) -> bytes:
         raise RuntimeError("未找到系统中文字体,无法生成中文 PDF。")
 
     data = resume.data
-    tpl = TEMPLATES.get(data.template, TEMPLATES["classic"])
+    tpl_key = data.template or "classic"
+
+    # 三个模板各自独立渲染,版式与前端 ResumePreview.tsx 对齐
+    if tpl_key == "modern":
+        return _pdf_modern(data, resume, font_path)
+    if tpl_key == "minimal":
+        return _pdf_minimal(data, resume, font_path)
+    return _pdf_classic(data, resume, font_path)
+
+
+def _pdf_classic(data, resume, font_path) -> bytes:
+    """经典模板:居中头部 + 传统单栏(对应前端 ClassicPreview)."""
+    from fpdf import FPDF, XPos, YPos
+    accent = TEMPLATES["classic"]["accent"]
+    accent_rgb = _hex_to_rgb(accent)
 
     pdf = FPDF()
     pdf.add_page()
     pdf.add_font("CJK", "", font_path)
     pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.set_margins(15, 15, 15)
 
-    # 头像(如果有)- 右上角放置,30mm 见方
-    if data.basics.photo:
-        photo_path = _resolve_photo_path(data.basics.photo)
-        if photo_path and photo_path.exists():
-            try:
-                # 右上角,x = 页宽 - 右边距 - 30, y = 顶部 10mm
-                page_w = pdf.w
-                right_margin = pdf.r_margin
-                pdf.image(str(photo_path), x=page_w - right_margin - 30, y=10, w=30, h=30)
-            except Exception:
-                pass  # 图片加载失败不影响导出
+    # 头部:头像(左) + 姓名/意向/联系方式(右),整体居中
+    photo_path = _resolve_photo_path(data.basics.photo) if data.basics.photo else None
+    has_photo = photo_path and photo_path.exists()
+    header_x = 15
+
+    if has_photo:
+        try:
+            pdf.image(str(photo_path), x=pdf.l_margin, y=15, w=25, h=25)
+        except Exception:
+            has_photo = False
 
     # 姓名
+    name_x = pdf.l_margin + 30 if has_photo else pdf.l_margin
+    pdf.set_xy(name_x, 18)
     pdf.set_font("CJK", size=22)
-    pdf.set_text_color(*_hex_to_rgb(tpl["accent"]))
-    pdf.cell(0, 14, text=data.basics.name or resume.name, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    pdf.set_text_color(*accent_rgb)
+    pdf.cell(0, 12, text=data.basics.name or resume.name, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     pdf.set_text_color(0, 0, 0)
 
     # 求职意向
     if data.basics.title:
+        pdf.set_x(name_x)
         pdf.set_font("CJK", size=12)
         pdf.cell(0, 7, text=data.basics.title, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
     # 联系方式
-    contact_parts = [
-        p for p in [data.basics.phone, data.basics.email, data.basics.location]
-        if p
-    ]
+    contact_parts = [p for p in [data.basics.phone, data.basics.email, data.basics.location] if p]
     if contact_parts:
+        pdf.set_x(name_x)
         pdf.set_font("CJK", size=10)
         pdf.set_text_color(90, 90, 90)
         pdf.cell(0, 6, text=" | ".join(contact_parts), new_x=XPos.LMARGIN, new_y=YPos.NEXT)
         pdf.set_text_color(0, 0, 0)
 
-    pdf.ln(3)
+    pdf.ln(5)
 
     def _section(title: str):
-        pdf.set_font("CJK", size=14)
-        pdf.set_text_color(*_hex_to_rgb(tpl["accent"]))
+        pdf.set_font("CJK", size=13)
+        pdf.set_text_color(*accent_rgb)
         pdf.cell(0, 8, text=title, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
         pdf.set_text_color(0, 0, 0)
-        # 分隔线
         y = pdf.get_y()
-        pdf.set_draw_color(*_hex_to_rgb(tpl["accent"]))
+        pdf.set_draw_color(*accent_rgb)
         pdf.set_line_width(0.3)
         pdf.line(pdf.l_margin, y, pdf.w - pdf.r_margin, y)
         pdf.ln(2)
 
-    def _text(text: str, size: int = 10, indent: float = 0):
+    def _text(text: str, size: int = 10, indent: float = 0, color=(0, 0, 0)):
         if not text:
             return
         pdf.set_font("CJK", size=size)
+        pdf.set_text_color(*color)
         if indent:
             pdf.set_x(pdf.l_margin + indent)
         pdf.multi_cell(0, 5.5, text=text)
+        pdf.set_text_color(0, 0, 0)
         pdf.ln(0.5)
 
     if data.basics.summary:
@@ -472,6 +488,314 @@ def export_resume_pdf(resume: Resume) -> bytes:
         for grp in data.skills:
             if grp.items:
                 _text(f"{grp.category}：{', '.join(grp.items)}", size=10, indent=2)
+
+    return bytes(pdf.output())
+
+
+def _pdf_modern(data, resume, font_path) -> bytes:
+    """现代模板:左侧栏(头像/姓名/技能/教育)+ 右栏(简介/工作/项目)."""
+    from fpdf import FPDF, XPos, YPos
+    accent = TEMPLATES["modern"]["accent"]
+    accent_rgb = _hex_to_rgb(accent)
+
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.add_font("CJK", "", font_path)
+    pdf.set_auto_page_break(auto=True, margin=12)
+
+    page_w = pdf.w
+    page_h = pdf.h
+    left_w = 60  # 左栏宽度 mm
+    left_bg_rgb = (accent_rgb[0] // 16, accent_rgb[1] // 16, accent_rgb[2] // 16)  # 极淡背景
+
+    # 左栏背景色块(用矩形填充,跨整页高度)
+    pdf.set_fill_color(*left_bg_rgb)
+    pdf.rect(0, 0, left_w, page_h, style="F")
+    # 左右栏分隔线
+    pdf.set_draw_color(*accent_rgb)
+    pdf.set_line_width(0.4)
+    pdf.line(left_w, 0, left_w, page_h)
+
+    # ── 左栏内容 ──
+    left_pad = 6
+    y = 15
+
+    # 头像
+    photo_path = _resolve_photo_path(data.basics.photo) if data.basics.photo else None
+    if photo_path and photo_path.exists():
+        try:
+            pdf.image(str(photo_path), x=left_w / 2 - 12, y=y, w=24, h=24)
+            y += 27
+        except Exception:
+            pass
+
+    # 姓名
+    pdf.set_xy(left_pad, y)
+    pdf.set_font("CJK", size=18)
+    pdf.set_text_color(*accent_rgb)
+    pdf.multi_cell(left_w - left_pad * 2, 8, text=data.basics.name or resume.name)
+    pdf.set_text_color(0, 0, 0)
+    y = pdf.get_y() + 1
+
+    # 求职意向
+    if data.basics.title:
+        pdf.set_xy(left_pad, y)
+        pdf.set_font("CJK", size=11)
+        pdf.set_text_color(*accent_rgb)
+        pdf.cell(left_w - left_pad * 2, 6, text=data.basics.title)
+        pdf.set_text_color(0, 0, 0)
+        y += 7
+
+    # 联系方式
+    contact_parts = [p for p in [data.basics.phone, data.basics.email, data.basics.location] if p]
+    if contact_parts:
+        pdf.set_xy(left_pad, y)
+        pdf.set_font("CJK", size=9)
+        pdf.set_text_color(90, 90, 90)
+        pdf.multi_cell(left_w - left_pad * 2, 4.5, text="\n".join(contact_parts))
+        pdf.set_text_color(0, 0, 0)
+        y = pdf.get_y() + 3
+
+    def _left_section(title: str):
+        nonlocal y
+        pdf.set_xy(left_pad, y)
+        pdf.set_font("CJK", size=10)
+        pdf.set_text_color(*accent_rgb)
+        pdf.cell(left_w - left_pad * 2, 6, text=title)
+        pdf.set_text_color(0, 0, 0)
+        y += 7
+
+    # 技能(左栏)
+    if data.skills:
+        _left_section("技能")
+        for s in data.skills:
+            pdf.set_xy(left_pad, y)
+            pdf.set_font("CJK", size=9)
+            pdf.set_text_color(110, 110, 110)
+            pdf.cell(left_w - left_pad * 2, 4.5, text=s.category)
+            y += 4.5
+            if s.items:
+                pdf.set_xy(left_pad, y)
+                pdf.set_font("CJK", size=9)
+                pdf.set_text_color(50, 50, 50)
+                pdf.multi_cell(left_w - left_pad * 2, 4.5, text=" · ".join(s.items))
+                y = pdf.get_y()
+            y += 1.5
+
+    # 教育(左栏)
+    if data.education:
+        _left_section("教育")
+        for e in data.education:
+            pdf.set_xy(left_pad, y)
+            pdf.set_font("CJK", size=9)
+            pdf.set_text_color(50, 50, 50)
+            pdf.cell(left_w - left_pad * 2, 4.5, text=e.school or "")
+            y += 4.5
+            pdf.set_xy(left_pad, y)
+            pdf.set_font("CJK", size=8)
+            pdf.set_text_color(110, 110, 110)
+            pdf.cell(left_w - left_pad * 2, 4, text=f"{e.major} {e.degree}")
+            y += 4
+            if e.start or e.end:
+                pdf.set_xy(left_pad, y)
+                pdf.set_font("CJK", size=8)
+                pdf.set_text_color(140, 140, 140)
+                pdf.cell(left_w - left_pad * 2, 4, text=f"{e.start} - {e.end}")
+                y += 4
+            y += 2
+
+    # ── 右栏内容 ──
+    right_x = left_w + 6
+    right_w = page_w - right_x - pdf.r_margin
+    pdf.set_xy(right_x, 15)
+
+    def _right_section(title: str):
+        pdf.set_x(right_x)
+        pdf.set_font("CJK", size=12)
+        pdf.set_text_color(*accent_rgb)
+        pdf.cell(right_w, 7, text=title, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        pdf.set_text_color(0, 0, 0)
+        y2 = pdf.get_y()
+        pdf.set_draw_color(*accent_rgb)
+        pdf.set_line_width(0.2)
+        pdf.line(right_x, y2, right_x + right_w, y2)
+        pdf.ln(2)
+
+    def _right_text(text: str, size: int = 10, color=(0, 0, 0)):
+        if not text:
+            return
+        pdf.set_x(right_x)
+        pdf.set_font("CJK", size=size)
+        pdf.set_text_color(*color)
+        pdf.multi_cell(right_w, 5.5, text=text)
+        pdf.set_text_color(0, 0, 0)
+        pdf.ln(0.5)
+
+    if data.basics.summary:
+        _right_section("个人简介")
+        _right_text(data.basics.summary)
+
+    if data.experiences:
+        _right_section("工作经历")
+        for e in data.experiences:
+            _right_text(f"{e.company}  {e.position}  ({e.start} - {e.end})", size=11)
+            if e.description:
+                _right_text(e.description, size=9, color=(90, 90, 90))
+
+    if data.projects:
+        _right_section("项目经历")
+        for p in data.projects:
+            line = p.name
+            if p.role:
+                line += f"  {p.role}"
+            _right_text(line, size=11)
+            if p.description:
+                _right_text(p.description, size=9, color=(90, 90, 90))
+            if p.tech_stack:
+                _right_text(f"技术栈：{', '.join(p.tech_stack)}", size=9, color=(140, 140, 140))
+
+    return bytes(pdf.output())
+
+
+def _pdf_minimal(data, resume, font_path) -> bytes:
+    """极简模板:大留白 + 左侧时间列网格(对应前端 MinimalPreview)."""
+    from fpdf import FPDF, XPos, YPos
+    accent = TEMPLATES["minimal"]["accent"]
+    accent_rgb = _hex_to_rgb(accent)
+
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.add_font("CJK", "", font_path)
+    pdf.set_auto_page_break(auto=True, margin=18)
+    pdf.set_margins(20, 20, 20)
+
+    # 头部:姓名(左) + 头像(右)
+    photo_path = _resolve_photo_path(data.basics.photo) if data.basics.photo else None
+    has_photo = photo_path and photo_path.exists()
+
+    # 姓名(大号细体)
+    pdf.set_xy(pdf.l_margin, 20)
+    pdf.set_font("CJK", size=26)
+    pdf.set_text_color(*accent_rgb)
+    pdf.cell(0, 12, text=data.basics.name or resume.name, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    pdf.set_text_color(0, 0, 0)
+
+    # 求职意向
+    if data.basics.title:
+        pdf.set_font("CJK", size=12)
+        pdf.set_text_color(140, 140, 140)
+        pdf.cell(0, 7, text=data.basics.title, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        pdf.set_text_color(0, 0, 0)
+
+    # 联系方式
+    contact_parts = [p for p in [data.basics.phone, data.basics.email, data.basics.location] if p]
+    if contact_parts:
+        pdf.set_font("CJK", size=10)
+        pdf.set_text_color(140, 140, 140)
+        pdf.cell(0, 6, text="  ·  ".join(contact_parts), new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        pdf.set_text_color(0, 0, 0)
+
+    # 头像(右上角)
+    if has_photo:
+        try:
+            page_w = pdf.w
+            pdf.image(str(photo_path), x=page_w - pdf.r_margin - 24, y=20, w=24, h=24)
+        except Exception:
+            pass
+
+    pdf.ln(8)
+
+    # 个人简介(左侧细竖线)
+    if data.basics.summary:
+        x = pdf.l_margin
+        y = pdf.get_y()
+        pdf.set_draw_color(220, 220, 220)
+        pdf.set_line_width(0.5)
+        pdf.line(x, y, x, y + 16)
+        pdf.set_xy(x + 4, y)
+        pdf.set_font("CJK", size=11)
+        pdf.set_text_color(80, 80, 80)
+        pdf.multi_cell(0, 5.5, text=data.basics.summary)
+        pdf.set_text_color(0, 0, 0)
+        pdf.ln(6)
+
+    time_col_w = 35  # 左侧时间列宽度
+    grid_gap = 3
+
+    def _grid_section(title: str, items: list, render_fn):
+        if not items:
+            return
+        # 小写灰色标题
+        pdf.set_font("CJK", size=10)
+        pdf.set_text_color(150, 150, 150)
+        pdf.cell(0, 6, text=title, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        pdf.set_text_color(0, 0, 0)
+        pdf.ln(1)
+        for item in items:
+            y0 = pdf.get_y()
+            # 左列:时间
+            time_text = render_fn(item).get("time", "")
+            pdf.set_xy(pdf.l_margin, y0)
+            pdf.set_font("CJK", size=9)
+            pdf.set_text_color(150, 150, 150)
+            pdf.multi_cell(time_col_w, 5, text=time_text)
+            # 右列:内容
+            content = render_fn(item).get("content", "")
+            detail = render_fn(item).get("detail", "")
+            right_x = pdf.l_margin + time_col_w + grid_gap
+            right_w = pdf.w - right_x - pdf.r_margin
+            pdf.set_xy(right_x, y0)
+            pdf.set_font("CJK", size=11)
+            pdf.set_text_color(40, 40, 40)
+            pdf.multi_cell(right_w, 5.5, text=content)
+            if detail:
+                pdf.set_x(right_x)
+                pdf.set_font("CJK", size=9)
+                pdf.set_text_color(110, 110, 110)
+                pdf.multi_cell(right_w, 5, text=detail)
+            pdf.ln(2)
+
+    # 工作经历
+    if data.experiences:
+        _grid_section("经历", data.experiences, lambda e: {
+            "time": f"{e.start} - {e.end}" if e.start or e.end else "",
+            "content": f"{e.company}" + (f" · {e.position}" if e.position else ""),
+            "detail": e.description or "",
+        })
+
+    # 项目经历
+    if data.projects:
+        _grid_section("项目", data.projects, lambda p: {
+            "time": f"{p.start} - {p.end}" if p.start or p.end else "",
+            "content": f"{p.name}" + (f" · {p.role}" if p.role else ""),
+            "detail": (p.description or "") + (f"\n技术栈：{', '.join(p.tech_stack)}" if p.tech_stack else ""),
+        })
+
+    # 教育
+    if data.education:
+        _grid_section("教育", data.education, lambda e: {
+            "time": f"{e.start} - {e.end}" if e.start or e.end else "",
+            "content": f"{e.school}" + (f" · {e.major}" if e.major else ""),
+            "detail": e.degree or "",
+        })
+
+    # 技能(单行)
+    if data.skills:
+        pdf.set_font("CJK", size=10)
+        pdf.set_text_color(150, 150, 150)
+        pdf.cell(0, 6, text="技能", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        pdf.set_text_color(0, 0, 0)
+        pdf.ln(1)
+        all_skills = []
+        for s in data.skills:
+            if s.items:
+                all_skills.append(" · ".join(s.items))
+            else:
+                all_skills.append(s.category)
+        pdf.set_font("CJK", size=11)
+        pdf.set_text_color(80, 80, 80)
+        pdf.multi_cell(0, 5.5, text="  ·  ".join(all_skills))
+        pdf.set_text_color(0, 0, 0)
 
     return bytes(pdf.output())
 
