@@ -20,7 +20,6 @@ from .graph.analysis_graph import AnalysisGraph
 from .graph.interview_graph import InterviewFlowGraph
 from .store.interview_store import InterviewStore, new_interview_state
 from .memory import HireMindMemory
-from .store.run_store import RunStore
 from .store.analysis_store import AnalysisStore, new_analysis_state
 from .models.schemas import (
     InterviewResult,
@@ -28,7 +27,7 @@ from .models.schemas import (
     StageConfig,
 )
 from .nodes.interview_nodes import DEFAULT_STAGE_CONFIGS
-from .store.ask_store import AskState
+from .store.ask_store import AskState, AskStore
 from .tools import TOOL_SPECS, build_tool_registry, validate_tool
 from .workspace import HireMindWorkspace
 
@@ -58,7 +57,7 @@ class HireMindAgent:
         model_client: BaseChatModel,
         workspace: HireMindWorkspace,
         analysis_store: AnalysisStore,
-        run_store: RunStore,
+        run_store: AskStore,
         max_steps: int = MAX_STEPS_DEFAULT,
         max_retries: int = MAX_RETRIES_DEFAULT,
         analysis: Optional[Dict[str, Any]] = None,
@@ -66,7 +65,7 @@ class HireMindAgent:
         self.model_client = model_client
         self.workspace = workspace
         self.analysis_store = analysis_store
-        self.run_store = run_store
+        self.ask_store = run_store
         self.max_steps = max_steps
         self.max_retries = max_retries
 
@@ -106,7 +105,7 @@ class HireMindAgent:
         self._record_history("user", user_message)
         task_state = AskState.create(user_message)
         self.current_task_state = task_state
-        self.run_store.start_run(task_state)
+        self.ask_store.start_run(task_state)
 
         retries = 0
 
@@ -123,7 +122,7 @@ class HireMindAgent:
             prompt, metadata = self.context_manager.build(user_message, page_context)
             self.last_prompt_metadata = metadata
             task_state.record_attempt()
-            self.run_store.append_trace(task_state, "prompt_built", metadata)
+            self.ask_store.append_trace(task_state, "prompt_built", metadata)
 
             # 调模型
             try:
@@ -134,10 +133,10 @@ class HireMindAgent:
                 raw_output = response.content if hasattr(response, "content") else str(response)
             except Exception as exc:
                 task_state.stop_model_error(str(exc))
-                self.run_store.append_trace(task_state, "model_error", {"error": str(exc)})
+                self.ask_store.append_trace(task_state, "model_error", {"error": str(exc)})
                 break
 
-            self.run_store.append_trace(task_state, "model_response", {
+            self.ask_store.append_trace(task_state, "model_response", {
                 "raw_output": raw_output[:1000],
             })
 
@@ -147,12 +146,12 @@ class HireMindAgent:
             if kind == "tool":
                 tool_name = payload.get("name", "")
                 tool_args = payload.get("args", {})
-                self.run_store.append_trace(task_state, "tool_called", {
+                self.ask_store.append_trace(task_state, "tool_called", {
                     "name": tool_name,
                     "args": tool_args,
                 })
                 tool_result = self.run_tool(tool_name, tool_args)
-                self.run_store.append_trace(task_state, "tool_result", {
+                self.ask_store.append_trace(task_state, "tool_result", {
                     "name": tool_name,
                     "result": tool_result[:1000],
                 })
@@ -172,7 +171,7 @@ class HireMindAgent:
                 retries += 1
                 retry_msg = payload.get("message", "需要更多信息")
                 user_message = f"[系统提示：模型请求重试] {retry_msg}\n请重新处理用户的原始请求。"
-                self.run_store.append_trace(task_state, "retry", {"message": retry_msg})
+                self.ask_store.append_trace(task_state, "retry", {"message": retry_msg})
                 continue
 
             else:
@@ -269,15 +268,15 @@ class HireMindAgent:
 
     def _finalize_run(self, task_state: AskState, answer: str) -> None:
         """收尾：写 task_state、report，保存分析."""
-        self.run_store.write_task_state(task_state)
-        self.run_store.write_report(task_state, {
+        self.ask_store.write_task_state(task_state)
+        self.ask_store.write_report(task_state, {
             "status": task_state.status,
             "stop_reason": task_state.stop_reason,
             "tool_steps": task_state.tool_steps,
             "attempts": task_state.attempts,
             "final_answer": answer[:500],
         })
-        self.run_store.append_trace(task_state, "run_finished", {
+        self.ask_store.append_trace(task_state, "run_finished", {
             "status": task_state.status,
         })
         self.analysis_store.save(self.analysis)
@@ -295,7 +294,7 @@ class HireMindAgent:
         model_client: BaseChatModel,
         workspace: HireMindWorkspace,
         analysis_store: AnalysisStore,
-        run_store: RunStore,
+        run_store: AskStore,
         analysis_id: str,
         **kwargs,
     ) -> "HireMindAgent":

@@ -4,16 +4,14 @@
 - interview_store  模拟面试会话磁盘仓储
 - resume_store     简历磁盘仓储
 - position_store   职位/JD 磁盘仓储
-- ask_store        单次 ask() 的运行状态机快照
-- run_store        单次 ask() 运行的审计工件落盘器
+- ask_store        ask 单次运行:状态机快照 + 审计工件落盘(AskState + AskStore)
 """
 
 from .analysis_store import AnalysisStore, new_analysis_state
-from .ask_store import AskState
+from .ask_store import AskState, AskStore
 from .interview_store import InterviewStore, new_interview_state
 from .position_store import PositionStore
 from .resume_store import ResumeStore
-from .run_store import RunStore
 
 __all__ = [
     "AnalysisStore",
@@ -21,7 +19,7 @@ __all__ = [
     "ResumeStore",
     "PositionStore",
     "AskState",
-    "RunStore",
+    "AskStore",
     "new_analysis_state",
     "new_interview_state",
 ]

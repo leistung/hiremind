@@ -184,7 +184,7 @@ def run_analysis(req: AnalysisRequest):
     前端通过 GET /analysis/history/{analysis_id} 轮询结果。
     company_name 与 job_title 可选,留空时使用占位符。
     """
-    from hiremind import AnalysisStore, RunStore, HireMindAgent
+    from hiremind import AnalysisStore, AskStore, HireMindAgent
     from hiremind.store.analysis_store import new_analysis_state
 
     try:
@@ -235,7 +235,7 @@ def run_analysis(req: AnalysisRequest):
                     model_client=llm,
                     workspace=ws,
                     analysis_store=analysis_store,
-                    run_store=RunStore(ws.runs_dir),
+                    run_store=AskStore(ws.runs_dir),
                     analysis_id=analysis_id,
                 )
 
@@ -892,13 +892,13 @@ def recommend_stages(req: StageRecommendRequest):
     try:
         agent = get_agent()
         if req.analysis_id and req.analysis_id != agent.analysis.get("id"):
-            from hiremind import HireMindAgent, AnalysisStore, RunStore
+            from hiremind import HireMindAgent, AnalysisStore, AskStore
             ws = get_workspace()
             agent = HireMindAgent.from_analysis(
                 model_client=agent.model_client,
                 workspace=ws,
                 analysis_store=AnalysisStore(ws.analyses_dir),
-                run_store=RunStore(ws.runs_dir),
+                run_store=AskStore(ws.runs_dir),
                 analysis_id=req.analysis_id,
             )
         result_data = agent.analysis.get("interview_result")
@@ -929,13 +929,13 @@ def start_interview(req: InterviewStartRequest):
     try:
         agent = get_agent()
         if req.analysis_id and req.analysis_id != agent.analysis.get("id"):
-            from hiremind import HireMindAgent, AnalysisStore, RunStore
+            from hiremind import HireMindAgent, AnalysisStore, AskStore
             ws = get_workspace()
             agent = HireMindAgent.from_analysis(
                 model_client=agent.model_client,
                 workspace=ws,
                 analysis_store=AnalysisStore(ws.analyses_dir),
-                run_store=RunStore(ws.runs_dir),
+                run_store=AskStore(ws.runs_dir),
                 analysis_id=req.analysis_id,
             )
 
@@ -1162,13 +1162,13 @@ async def ask_agent(req: AskRequest):
     agent = get_agent()
     # 可选:切换到指定分析的上下文
     if req.analysis_id and req.analysis_id != agent.analysis.get("id"):
-        from hiremind import HireMindAgent, AnalysisStore, RunStore
+        from hiremind import HireMindAgent, AnalysisStore, AskStore
         ws = get_workspace()
         agent = HireMindAgent.from_analysis(
             model_client=agent.model_client,
             workspace=ws,
             analysis_store=AnalysisStore(ws.analyses_dir),
-            run_store=RunStore(ws.runs_dir),
+            run_store=AskStore(ws.runs_dir),
             analysis_id=req.analysis_id,
         )
 

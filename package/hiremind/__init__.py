@@ -7,8 +7,8 @@ from .runtime import HireMindAgent
 from .store import (
     AnalysisStore,
     AskState,
+    AskStore,
     InterviewStore,
-    RunStore,
     new_analysis_state,
     new_interview_state,
 )
@@ -23,7 +23,7 @@ __all__ = [
     "AnalysisStore",
     "InterviewStore",
     "AskState",
-    "RunStore",
+    "AskStore",
     "InterviewInput",
     "InterviewResult",
     "new_analysis_state",
