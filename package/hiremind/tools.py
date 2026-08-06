@@ -7,10 +7,24 @@ HireMind 的工具是面试分析动作（而非文件操作），
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Dict, List
 
 if TYPE_CHECKING:
     from .runtime import HireMindAgent
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _safe_jsonable(obj: Any) -> Any:
+    """把可能含 Pydantic 模型/枚举的对象转为 JSON 可序列化结构."""
+    try:
+        json.dumps(obj, ensure_ascii=False)
+        return obj
+    except (TypeError, ValueError):
+        return json.loads(json.dumps(obj, ensure_ascii=False, default=str))
 
 # ── 工具规格 ──
 
@@ -55,6 +69,17 @@ TOOL_SPECS: List[Dict[str, Any]] = [
         "schema": {"filename": "str", "format": "str（json/md）"},
         "risky": True,
     },
+    {
+        "name": "read_node_io",
+        "description": "读取工作流节点的输入输出信息（分析图和模拟面试图的所有节点），用于回答用户关于分析/面试过程的提问",
+        "schema": {
+            "scope": "str（可选：analysis/interview/all，默认 all）",
+            "node": "str（可选：指定节点名如 parse_jd/evaluate_answer，默认返回全部）",
+            "analysis_id": "str（可选：指定分析记录 ID，默认用当前分析）",
+            "interview_id": "str（可选：指定模拟面试 ID）",
+        },
+        "risky": False,
+    },
 ]
 
 
@@ -70,6 +95,7 @@ def validate_tool(name: str, args: Dict[str, Any]) -> None:
     # run_analysis 的 company_name / job_title / company_business_scope 可选
     optional_keys = {
         "run_analysis": {"company_name", "job_title", "company_business_scope"},
+        "read_node_io": {"scope", "node", "analysis_id", "interview_id"},
     }
     optional = optional_keys.get(name, set())
     for key, expected_type in schema.items():
@@ -87,7 +113,6 @@ def validate_tool(name: str, args: Dict[str, Any]) -> None:
 def tool_run_analysis(agent: "HireMindAgent", args: Dict[str, Any]) -> str:
     """执行完整面试分析."""
     from .models.schemas import InterviewInput
-    from .graph.interview_graph import InterviewGraph
 
     input_data = InterviewInput(
         company_name=args.get("company_name", "") or "",
@@ -111,10 +136,7 @@ def tool_run_analysis(agent: "HireMindAgent", args: Dict[str, Any]) -> str:
     # 需显式保存,否则历史记录页读取磁盘文件时 interview_result 仍为 None
     agent.analysis_store.save(agent.analysis)
 
-    # 更新工作记忆
-    agent.memory.set_current_result(result.model_dump())
-
-    # 持久化简历版本
+    # 持久化简历版本到持久记忆(供 recall_memory 工具召回)
     try:
         agent.memory.save_resume_version(args["resume"])
         agent.memory.save_interview_summary(
@@ -172,12 +194,23 @@ def run_analysis_with_progress(agent: "HireMindAgent", args: Dict[str, Any], on_
 
     graph = agent.graph
     final_state = None
-    # 流式执行:逐节点回调进度
-    for node_name, label, state in graph.stream_run(input_data):
+    node_io_records: List[Dict[str, Any]] = []
+    # 流式执行:逐节点回调进度 + 记录 node_io
+    for node_name, label, state, patch in graph.stream_run(input_data):
         if on_progress:
             on_progress(node_name, label)
+        if node_name != "done":
+            node_io_records.append({
+                "node": node_name,
+                "label": label,
+                "output": _safe_jsonable(patch),
+                "ts": _now(),
+            })
         if node_name == "done":
             final_state = state
+
+    # 保存节点 IO 记录到分析 json,供 read_node_io 工具读取
+    agent.analysis["node_io"] = node_io_records
 
     # 组装最终结果
     result = InterviewResult(
@@ -199,10 +232,7 @@ def run_analysis_with_progress(agent: "HireMindAgent", args: Dict[str, Any], on_
     agent.analysis["error"] = None
     agent.analysis_store.save(agent.analysis)
 
-    # 更新工作记忆
-    agent.memory.set_current_result(result.model_dump())
-
-    # 持久化简历版本
+    # 持久化简历版本到持久记忆(供 recall_memory 工具召回)
     try:
         agent.memory.save_resume_version(args["resume"])
         agent.memory.save_interview_summary(
@@ -343,6 +373,56 @@ def tool_save_to_workspace(agent: "HireMindAgent", args: Dict[str, Any]) -> str:
     return f"已保存到工作区：{filename}（{len(content)} bytes）"
 
 
+def tool_read_node_io(agent: "HireMindAgent", args: Dict[str, Any]) -> str:
+    """读取工作流节点的输入输出信息(分析图 + 模拟面试图)."""
+    scope = args.get("scope", "all")
+    node_filter = args.get("node", "")
+    analysis_id = args.get("analysis_id", "")
+    interview_id = args.get("interview_id", "")
+
+    result: Dict[str, Any] = {}
+
+    # ── 分析图节点 IO ──
+    if scope in ("all", "analysis"):
+        try:
+            if analysis_id and analysis_id != agent.analysis.get("id"):
+                analysis = agent.analysis_store.load(analysis_id)
+            else:
+                analysis = agent.analysis
+            analysis_io = (analysis or {}).get("node_io", [])
+            if node_filter:
+                analysis_io = [
+                    r for r in analysis_io if r.get("node") == node_filter
+                ]
+            result["analysis_node_io"] = analysis_io
+        except Exception as exc:
+            result["analysis_node_io"] = f"读取失败: {exc}"
+
+    # ── 模拟面试图节点 IO ──
+    if scope in ("all", "interview"):
+        if interview_id:
+            try:
+                state = agent.interview_store.load(interview_id)
+                if state:
+                    iv_io = state.get("node_io") or []
+                    if node_filter:
+                        filtered = []
+                        for record in iv_io:
+                            for action, data in record.items():
+                                if action == node_filter:
+                                    filtered.append({action: data})
+                        iv_io = filtered
+                    result["interview_node_io"] = iv_io
+                else:
+                    result["interview_node_io"] = "模拟面试不存在"
+            except Exception as exc:
+                result["interview_node_io"] = f"读取失败: {exc}"
+        else:
+            result["interview_node_io"] = "未指定 interview_id,跳过"
+
+    return json.dumps(result, ensure_ascii=False, indent=2, default=str)
+
+
 # ── 工具运行器映射 ──
 
 _TOOL_RUNNERS: Dict[str, Callable] = {
@@ -351,6 +431,7 @@ _TOOL_RUNNERS: Dict[str, Callable] = {
     "recall_memory": tool_recall_memory,
     "export_report": tool_export_report,
     "save_to_workspace": tool_save_to_workspace,
+    "read_node_io": tool_read_node_io,
 }
 
 

@@ -10,17 +10,25 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from .context_manager import InterviewContextManager
-from .graph.interview_graph import InterviewGraph
+from .graph.analysis_graph import AnalysisGraph
+from .graph.interview_graph import InterviewFlowGraph
+from .store.interview_store import InterviewStore, new_interview_state
 from .memory import HireMindMemory
-from .run_store import RunStore
-from .analysis_store import AnalysisStore, new_analysis
-from .task_state import TaskState
+from .store.run_store import RunStore
+from .store.analysis_store import AnalysisStore, new_analysis_state
+from .models.schemas import (
+    InterviewResult,
+    InterviewStageType,
+    StageConfig,
+)
+from .nodes.interview_nodes import DEFAULT_STAGE_CONFIGS
+from .store.ask_store import AskState
 from .tools import TOOL_SPECS, build_tool_registry, validate_tool
 from .workspace import HireMindWorkspace
 
@@ -65,30 +73,38 @@ class HireMindAgent:
         self.workspace.ensure_dirs()
         self.memory = HireMindMemory(workspace.root)
         self.context_manager = InterviewContextManager(self)
-        self.graph = InterviewGraph()
+        # 两个独立工作流图:分析图(一次性 DAG)+ 模拟面试图(按 action 路由)
+        self.analysis_graph = AnalysisGraph()
+        self.interview_graph = InterviewFlowGraph()
+        # 向后兼容:tools.py 等旧代码用 agent.graph 指代分析图
+        self.graph = self.analysis_graph
+        # 模拟面试会话存储
+        self.interview_store = InterviewStore(workspace.interviews_dir)
         self.tools_spec = TOOL_SPECS
         self.tools = build_tool_registry(self)
 
         # 恢复或新建 analysis
         if analysis:
             self.analysis = analysis
-            # 恢复工作记忆
-            mem_state = analysis.get("memory", {})
-            if mem_state:
-                self.memory.from_dict(mem_state)
         else:
-            self.analysis = new_analysis()
+            self.analysis = new_analysis_state()
 
-        self.current_task_state: Optional[TaskState] = None
+        self.current_task_state: Optional[AskState] = None
+        # ask 上下文:当前模拟面试状态(由 ask 路由按 interview_id 加载,仅供 context_manager 渲染)
+        self.current_interview_state: Optional[Dict[str, Any]] = None
         self.last_prompt_metadata: Optional[Dict[str, Any]] = None
 
     # ── 核心入口 ──
 
-    def ask(self, user_message: str) -> str:
-        """执行一次完整 agent 回合."""
-        # 1. 记 history + 创建 TaskState
+    def ask(self, user_message: str, page_context: str = "") -> str:
+        """执行一次完整 agent 回合.
+
+        page_context: 前端传入的页面上下文(当前页面 + 业务状态摘要),
+        注入 prompt 让 agent 知道用户在做什么。
+        """
+        # 1. 记 history + 创建 AskState
         self._record_history("user", user_message)
-        task_state = TaskState.create(user_message)
+        task_state = AskState.create(user_message)
         self.current_task_state = task_state
         self.run_store.start_run(task_state)
 
@@ -104,7 +120,7 @@ class HireMindAgent:
                 break
 
             # 组装 prompt
-            prompt, metadata = self.context_manager.build(user_message)
+            prompt, metadata = self.context_manager.build(user_message, page_context)
             self.last_prompt_metadata = metadata
             task_state.record_attempt()
             self.run_store.append_trace(task_state, "prompt_built", metadata)
@@ -251,7 +267,7 @@ class HireMindAgent:
         })
         self.analysis_store.save(self.analysis)
 
-    def _finalize_run(self, task_state: TaskState, answer: str) -> None:
+    def _finalize_run(self, task_state: AskState, answer: str) -> None:
         """收尾：写 task_state、report，保存分析."""
         self.run_store.write_task_state(task_state)
         self.run_store.write_report(task_state, {
@@ -264,13 +280,11 @@ class HireMindAgent:
         self.run_store.append_trace(task_state, "run_finished", {
             "status": task_state.status,
         })
-        # 保存分析（含 memory）
-        self.analysis["memory"] = self.memory.to_dict()
         self.analysis_store.save(self.analysis)
 
     def reset(self) -> None:
         """清空当前分析，开始新分析."""
-        self.analysis = new_analysis()
+        self.analysis = new_analysis_state()
         self.memory = HireMindMemory(self.workspace.root)
         self.current_task_state = None
         self.last_prompt_metadata = None
@@ -319,3 +333,193 @@ class HireMindAgent:
             "job_requirements": job_requirements,
             "resume": resume,
         })
+
+    # ── 模拟面试编排(图状态化:直接调 interview_graph,不再经过 MockInterview)──
+    #
+    # 这些方法是对外的面试入口:加载/创建 InterviewFlowState,
+    # 调用 interview_graph.invoke 执行节点,持久化 state。
+    # routes 的 interview 端点统一调用这些方法。
+
+    def _resolve_analysis(self, analysis_id: str) -> Dict[str, Any]:
+        """按 analysis_id 加载分析记录;与当前 agent 分析相同时直接返回内存副本."""
+        if analysis_id and analysis_id != self.analysis.get("id"):
+            analysis = self.analysis_store.load(analysis_id)
+            if not analysis:
+                raise ValueError(f"Analysis not found: {analysis_id}")
+            return analysis
+        return self.analysis
+
+    def _load_interview_state(self, interview_id: str) -> Dict[str, Any]:
+        """加载模拟面试 state."""
+        state = self.interview_store.load(interview_id)
+        if not state:
+            raise ValueError(f"Interview not found: {interview_id}")
+        return state
+
+    def _save_interview_state(self, state: Dict[str, Any]) -> None:
+        """持久化模拟面试 state."""
+        self.interview_store.save(state.get("interview_id", ""), state)
+
+    def recommend_interview_stages(
+        self,
+        analysis_id: str,
+        expected_rounds: int = 4,
+        company_business_scope: str = "",
+        jd_summary: str = "",
+    ) -> List[StageConfig]:
+        """智能规划面试阶段方案(走 interview_graph 的 recommend_stages 节点)."""
+        analysis = self._resolve_analysis(analysis_id)
+        result_data = analysis.get("interview_result")
+        if not result_data:
+            raise ValueError("该分析尚未生成报告,请先在分析页生成报告")
+        result = InterviewResult.model_validate(result_data)
+
+        match_json = result.match_analysis.model_dump_json(indent=2)
+        scenarios_json = "\n\n".join(
+            s.model_dump_json(indent=2) for s in result.business_scenarios
+        )
+        risks_json = "\n\n".join(r.model_dump_json(indent=2) for r in result.risks)
+
+        # 走 graph 的 recommend_stages 节点
+        result_state = self.interview_graph.invoke({}, "recommend_stages", {
+            "company_name": result.company_name,
+            "job_title": result.job_title,
+            "company_business_scope": company_business_scope,
+            "jd_summary": jd_summary,
+            "match_analysis": match_json,
+            "business_scenarios": scenarios_json,
+            "risks": risks_json,
+            "expected_rounds": expected_rounds,
+        })
+        if result_state.get("error"):
+            # 降级:默认配置裁剪到期望轮次
+            return self._fallback_stage_configs(expected_rounds)
+
+        out = result_state.get("output") or {}
+        stages = out.get("stages")
+        if not stages:
+            return self._fallback_stage_configs(expected_rounds)
+
+        configs: List[StageConfig] = []
+        for item in stages:
+            stage_type = InterviewStageType(item["stage_type"])
+            qc = int(item.get("question_count", 10))
+            if stage_type == InterviewStageType.WRITTEN:
+                qc = max(5, min(20, qc))
+            else:
+                qc = max(1, min(9, qc))
+            configs.append(StageConfig(
+                stage_type=stage_type,
+                stage_name=item.get("stage_name") or stage_type.value,
+                question_count=qc,
+                focus=item.get("focus", ""),
+                rationale=item.get("rationale", ""),
+            ))
+        return configs if configs else self._fallback_stage_configs(expected_rounds)
+
+    @staticmethod
+    def _fallback_stage_configs(expected_rounds: int) -> List[StageConfig]:
+        """LLM 失败时的降级方案:根据轮次数裁剪默认配置."""
+        base = list(DEFAULT_STAGE_CONFIGS)
+        if expected_rounds >= len(base):
+            return base
+        if expected_rounds <= 2:
+            return [
+                StageConfig(stage_type=InterviewStageType.TECH_1, stage_name="技术一面"),
+                StageConfig(stage_type=InterviewStageType.HR, stage_name="人事面"),
+            ]
+        if expected_rounds == 3:
+            return [
+                StageConfig(stage_type=InterviewStageType.WRITTEN, stage_name="笔试", question_count=10),
+                StageConfig(stage_type=InterviewStageType.TECH_1, stage_name="技术一面"),
+                StageConfig(stage_type=InterviewStageType.HR, stage_name="人事面"),
+            ]
+        return base[:expected_rounds]
+
+    def start_interview(
+        self,
+        analysis_id: str,
+        max_turns: int = 8,
+        stages: Optional[List[Dict[str, Any]]] = None,
+    ) -> tuple:
+        """启动一场模拟面试,返回 (state, output).
+
+        output 包含 question_text(对话阶段)或 signal(笔试就绪)。
+        """
+        analysis = self._resolve_analysis(analysis_id)
+        result_data = analysis.get("interview_result")
+        if not result_data:
+            raise ValueError("该分析尚未生成报告,请先在分析页生成报告")
+        result = InterviewResult.model_validate(result_data)
+
+        stage_configs: List[Dict[str, Any]] = []
+        if stages:
+            for s in stages:
+                if not s.get("enabled", True):
+                    continue
+                stage_configs.append(StageConfig.model_validate(s).model_dump())
+
+        state = new_interview_state(
+            analysis_id=analysis.get("id", analysis_id),
+            result=result,
+            max_turns=max_turns,
+            stage_configs=stage_configs or None,
+        )
+        state = self.interview_graph.invoke(state, "start")
+        self._save_interview_state(state)
+        return state, state.get("output") or {}
+
+    def submit_interview_answer(self, interview_id: str, answer: str) -> tuple:
+        """提交回答,返回 (state, output)."""
+        state = self._load_interview_state(interview_id)
+        state = self.interview_graph.invoke(state, "submit_answer", {"answer": answer})
+        self._save_interview_state(state)
+        return state, state.get("output") or {}
+
+    def next_interview_question(self, interview_id: str) -> tuple:
+        """生成下一题,返回 (state, output).
+
+        output 可能包含:
+        - question_text: 下一题文本
+        - signal: __INTERVIEW_FINISHED__ / __STAGE_COMPLETED__
+        """
+        state = self._load_interview_state(interview_id)
+        state = self.interview_graph.invoke(state, "next_question")
+        self._save_interview_state(state)
+        return state, state.get("output") or {}
+
+    def submit_interview_written(self, interview_id: str, answers: Dict[int, str]) -> tuple:
+        """笔试批量提交,返回 (state, output)."""
+        state = self._load_interview_state(interview_id)
+        state = self.interview_graph.invoke(state, "submit_written", {"answers": answers})
+        self._save_interview_state(state)
+        return state, state.get("output") or {}
+
+    def advance_interview_stage(self, interview_id: str) -> tuple:
+        """进入下一阶段,返回 (state, output)."""
+        state = self._load_interview_state(interview_id)
+        if not state.get("is_multi_stage"):
+            raise ValueError("当前面试不是多阶段模式")
+        state = self.interview_graph.invoke(state, "advance_stage")
+        self._save_interview_state(state)
+        return state, state.get("output") or {}
+
+    def finish_interview(self, interview_id: str) -> tuple:
+        """主动结束面试,生成最终报告,返回 (state, report_dict)."""
+        state = self._load_interview_state(interview_id)
+        state = self.interview_graph.invoke(state, "finish")
+        self._save_interview_state(state)
+        return state, state.get("report") or {}
+
+    def abandon_interview(self, interview_id: str) -> Dict[str, Any]:
+        """放弃面试(不生成报告)."""
+        state = self._load_interview_state(interview_id)
+        if state.get("status") not in ("finished", "abandoned"):
+            state = self.interview_graph.invoke(state, "abandon")
+            self._save_interview_state(state)
+        return state
+
+    def get_interview_state(self, interview_id: str) -> Dict[str, Any]:
+        """获取模拟面试 state."""
+        return self._load_interview_state(interview_id)
+

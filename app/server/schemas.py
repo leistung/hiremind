@@ -138,6 +138,16 @@ class InterviewListResponse(BaseModel):
     interviews: List[Dict[str, Any]]
 
 
+class AskRequest(BaseModel):
+    """与 agent 对话(ask 悬浮球)."""
+
+    message: str
+    analysis_id: Optional[str] = None
+    interview_id: Optional[str] = None
+    page: Optional[str] = None          # 当前页面路径,如 /analysis /interview
+    context: Optional[str] = None       # 业务状态摘要,前端组装
+
+
 # ── 历史记录 ──
 
 class AnalysisHistoryResponse(BaseModel):

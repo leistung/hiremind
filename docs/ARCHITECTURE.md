@@ -585,6 +585,6 @@ FastAPI 的 `async def` 路由在事件循环中执行,调用同步 LLM SDK(如 
 
 ## 十、相关文档
 
-- [README.md](./README.md) — 项目概览与功能介绍
-- [RUNTIME_DATA.md](./RUNTIME_DATA.md) — `.hiremind/` 运行时数据目录说明
-- [package/ARCHITECTURE.md](./package/ARCHITECTURE.md) — 核心包架构详解(模型/agent/tool/记忆/存储)
+- [README.md](../README.md) — 项目概览与功能介绍
+- [RUNTIME_DATA.md](RUNTIME_DATA.md) — `.hiremind/` 运行时数据目录说明
+- [package/ARCHITECTURE.md](../package/ARCHITECTURE.md) — 核心包架构详解(模型/agent/tool/记忆/存储)

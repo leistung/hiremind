@@ -4,7 +4,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from hiremind import HireMindAgent, HireMindWorkspace, RunStore, AnalysisStore
-from hiremind.services import InterviewStore, PositionStore, ResumeStore, get_llm
+from hiremind.store import InterviewStore, PositionStore, ResumeStore
 from hiremind.services.llm_service import get_llm as _get_llm
 
 from .config import settings

@@ -3,7 +3,7 @@
 > 路径：`package/hiremind/`
 > 本文深入讲解核心包的内部架构：**数据模型 → Agent 运行时 → 工具系统 → LangGraph 工作流 → 记忆系统 → 存储层**，以及它们如何协作完成"面试分析 + 模拟面试"两大核心场景。
 >
-> 使用指南（怎么调）见 [PACKAGE_GUIDE.md](./PACKAGE_GUIDE.md)，整体项目架构见 [ARCHITECTURE.md](../ARCHITECTURE.md)。
+> 使用指南（怎么调）见 [PACKAGE_GUIDE.md](./PACKAGE_GUIDE.md)，整体项目架构见 [ARCHITECTURE.md](../docs/ARCHITECTURE.md)。
 
 ---
 
@@ -756,6 +756,6 @@ LLM 分析需 2-5 分钟，同步路由会阻塞。改为：
 ## 十三、相关文档
 
 - [PACKAGE_GUIDE.md](./PACKAGE_GUIDE.md) — 包的使用指南（怎么调）
-- [ARCHITECTURE.md](../ARCHITECTURE.md) — 项目整体架构（前后端 + 包）
-- [RUNTIME_DATA.md](../RUNTIME_DATA.md) — `.hiremind/` 运行时数据目录说明
+- [ARCHITECTURE.md](../docs/ARCHITECTURE.md) — 项目整体架构（前后端 + 包）
+- [RUNTIME_DATA.md](../docs/RUNTIME_DATA.md) — `.hiremind/` 运行时数据目录说明
 - [docs/multi-stage-interview-design.md](../docs/multi-stage-interview-design.md) — 多阶段面试设计方案

@@ -1,4 +1,8 @@
-"""TaskState：单次 ask() 的状态机快照."""
+"""AskState:单次 ask() 的状态机快照.
+
+记录一次 ask() 运行过程中的状态:进行到哪了、调了多少次工具、最后为什么停下。
+会被不断写入 task_state.json,供运行中观察和运行后复盘。
+"""
 
 from __future__ import annotations
 
@@ -26,12 +30,8 @@ def _now() -> str:
 
 
 @dataclass
-class TaskState:
-    """一次 ask() 运行过程中的状态机快照.
-
-    回答"这次请求进行到哪了、调了多少次工具、最后为什么停下"。
-    会被不断写入 task_state.json，供运行中观察和运行后复盘。
-    """
+class AskState:
+    """一次 ask() 运行过程中的状态机快照."""
 
     run_id: str = ""
     task_id: str = ""
@@ -46,31 +46,31 @@ class TaskState:
     updated_at: str = field(default_factory=_now)
 
     @classmethod
-    def create(cls, user_request: str) -> "TaskState":
+    def create(cls, user_request: str) -> "AskState":
         """工厂方法：创建一个新的运行状态."""
         run_id = f"run-{uuid4().hex[:12]}"
         task_id = f"task-{uuid4().hex[:8]}"
         return cls(run_id=run_id, task_id=task_id, user_request=user_request)
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "TaskState":
+    def from_dict(cls, data: Dict[str, Any]) -> "AskState":
         """从字典反序列化."""
         return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
 
-    def record_attempt(self) -> "TaskState":
+    def record_attempt(self) -> "AskState":
         """记录一次模型调用."""
         self.attempts += 1
         self.updated_at = _now()
         return self
 
-    def record_tool(self, name: str) -> "TaskState":
+    def record_tool(self, name: str) -> "AskState":
         """记录一次工具执行."""
         self.tool_steps += 1
         self.last_tool = name
         self.updated_at = _now()
         return self
 
-    def finish_success(self, final_answer: str) -> "TaskState":
+    def finish_success(self, final_answer: str) -> "AskState":
         """正常完成."""
         self.status = STATUS_COMPLETED
         self.stop_reason = STOP_REASON_FINAL_ANSWER
@@ -78,21 +78,21 @@ class TaskState:
         self.updated_at = _now()
         return self
 
-    def stop_step_limit(self) -> "TaskState":
+    def stop_step_limit(self) -> "AskState":
         """达到步数上限."""
         self.status = STATUS_STOPPED
         self.stop_reason = STOP_REASON_STEP_LIMIT
         self.updated_at = _now()
         return self
 
-    def stop_retry_limit(self) -> "TaskState":
+    def stop_retry_limit(self) -> "AskState":
         """达到重试上限."""
         self.status = STATUS_STOPPED
         self.stop_reason = STOP_REASON_RETRY_LIMIT
         self.updated_at = _now()
         return self
 
-    def stop_model_error(self, error: str = "") -> "TaskState":
+    def stop_model_error(self, error: str = "") -> "AskState":
         """模型调用出错."""
         self.status = STATUS_FAILED
         self.stop_reason = STOP_REASON_MODEL_ERROR
@@ -102,5 +102,4 @@ class TaskState:
 
     def to_dict(self) -> Dict[str, Any]:
         """序列化为字典."""
-        d = asdict(self)
-        return d
+        return asdict(self)

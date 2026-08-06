@@ -418,7 +418,7 @@ package/hiremind/
     └── export_service.py
 ```
 
-更细的运行时产物(生成的文件)说明见根目录的 [RUNTIME_DATA.md](../RUNTIME_DATA.md),整体架构见 [ARCHITECTURE.md](../ARCHITECTURE.md)。
+更细的运行时产物(生成的文件)说明见根目录的 [RUNTIME_DATA.md](../docs/RUNTIME_DATA.md),整体架构见 [ARCHITECTURE.md](../docs/ARCHITECTURE.md)。
 
 ---
 

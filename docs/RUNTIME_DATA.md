@@ -508,6 +508,6 @@ rm -rf .hiremind/reports/
 
 ## 六、相关文档
 
-- [README.md](./README.md) — 项目概览与功能介绍
-- [ARCHITECTURE.md](./ARCHITECTURE.md) — 架构设计、文件职责、API 设计、开发指南
-- [package/ARCHITECTURE.md](./package/ARCHITECTURE.md) — 核心包架构详解(模型/agent/tool/记忆/存储)
+- [README.md](../README.md) — 项目概览与功能介绍
+- [ARCHITECTURE.md](ARCHITECTURE.md) — 架构设计、文件职责、API 设计、开发指南
+- [package/ARCHITECTURE.md](../package/ARCHITECTURE.md) — 核心包架构详解(模型/agent/tool/记忆/存储)

@@ -1,4 +1,8 @@
-"""ContextManager：面试 Agent 的上下文提示词组装与预算控制."""
+"""ContextManager:ask 对话的上下文提示词组装与预算控制.
+
+仅供 ask() 使用,不参与分析图/面试图执行。
+从 agent.analysis 读取分析结果,从 agent.current_interview_state 读取模拟面试状态。
+"""
 
 from __future__ import annotations
 
@@ -12,12 +16,12 @@ if TYPE_CHECKING:
 DEFAULT_TOTAL_BUDGET = 12000
 DEFAULT_SECTION_BUDGETS = {
     "prefix": 2000,
-    "memory": 1500,
     "interview_result": 2500,
+    "interview_state": 2000,
     "history": 4500,
     "current_request": 1500,
 }
-DEFAULT_REDUCTION_ORDER = ["interview_result", "history", "memory", "prefix"]
+DEFAULT_REDUCTION_ORDER = ["interview_state", "interview_result", "history", "prefix"]
 RECENT_WINDOW = 6  # history 保留最近 N 轮不压缩
 
 AGENT_PREFIX = """你是 HireMind，一个专业的 AI 面试分析助手。
@@ -41,7 +45,7 @@ AGENT_PREFIX = """你是 HireMind，一个专业的 AI 面试分析助手。
 
 
 class InterviewContextManager:
-    """面试 Agent 的上下文组装器.
+    """ask 对话的上下文组装器.
 
     按 section 预算组装 prompt，超预算时按 reduction_order 逐段压缩。
     current_request 永不裁剪。
@@ -53,13 +57,13 @@ class InterviewContextManager:
         self.section_budgets = dict(DEFAULT_SECTION_BUDGETS)
         self.reduction_order = list(DEFAULT_REDUCTION_ORDER)
 
-    def build(self, user_message: str) -> Tuple[str, Dict]:
+    def build(self, user_message: str, page_context: str = "") -> Tuple[str, Dict]:
         """组装 prompt，返回 (prompt, metadata).
 
-        metadata 记录每个 section 的 raw/budget/rendered 字符数，
-        供 trace/report 解释 prompt 怎么被拼出来的。
+        page_context: 前端传入的页面上下文(当前页面 + 业务状态),
+        拼到 current_request 前让 agent 知道用户在做什么。
         """
-        sections = self._render_sections(user_message)
+        sections = self._render_sections(user_message, page_context)
         prompt = self._assemble_prompt(sections)
         metadata = {
             section: {
@@ -72,19 +76,18 @@ class InterviewContextManager:
         metadata["total_prompt_len"] = len(prompt)
         return prompt, metadata
 
-    def _render_sections(self, user_message: str) -> Dict[str, Dict]:
+    def _render_sections(self, user_message: str, page_context: str) -> Dict[str, Dict]:
         """渲染各 section 文本."""
-        # 1. 各 section 原始文本
         raw_texts = {
             "prefix": self._render_prefix(),
-            "memory": self.agent.memory.render_memory_text(),
             "interview_result": self._render_interview_result(),
+            "interview_state": self._render_interview_state(),
             "history": self._render_history(),
-            "current_request": user_message,
+            "current_request": self._render_current_request(user_message, page_context),
         }
 
         sections = {}
-        for name in ["prefix", "memory", "interview_result", "history", "current_request"]:
+        for name in ["prefix", "interview_result", "interview_state", "history", "current_request"]:
             raw = raw_texts[name]
             budget = self.section_budgets.get(name, 2000)
             if name == "current_request":
@@ -101,7 +104,7 @@ class InterviewContextManager:
                 "budget": budget,
             }
 
-        # 2. 如果总长度超预算，按 reduction_order 压缩
+        # 如果总长度超预算，按 reduction_order 压缩
         total = sum(len(s["text"]) for s in sections.values())
         if total > self.total_budget:
             for section_name in self.reduction_order:
@@ -131,12 +134,11 @@ class InterviewContextManager:
         return AGENT_PREFIX.format(tool_descriptions="\n".join(tool_descs))
 
     def _render_interview_result(self) -> str:
-        """渲染最近一次分析结果摘要."""
+        """渲染最近一次分析结果摘要(直接从 agent.analysis 读取)."""
         result = self.agent.analysis.get("interview_result")
         if not result:
             return ""
-        # 只保留关键字段的摘要
-        lines = ["最近一次分析结果摘要："]
+        lines = ["最近一次面试分析结果摘要："]
         if isinstance(result, dict):
             company = result.get("company_name", "")
             job = result.get("job_title", "")
@@ -145,15 +147,85 @@ class InterviewContextManager:
             if match:
                 strong = match.get("strong_points", [])
                 weak = match.get("weak_points", [])
-                lines.append(f"强匹配：{', '.join(strong[:3])}")
-                lines.append(f"弱项：{', '.join(weak[:3])}")
+                missing = match.get("not_mentioned", [])
+                lines.append(f"强匹配({len(strong)})：{', '.join(strong[:5])}")
+                lines.append(f"弱项({len(weak)})：{', '.join(weak[:5])}")
+                lines.append(f"缺失({len(missing)})：{', '.join(missing[:5])}")
+            scenarios = result.get("business_scenarios", [])
+            if scenarios:
+                lines.append(f"业务场景({len(scenarios)}个)：")
+                for s in scenarios[:3]:
+                    lines.append(f"  - {s.get('scenario', '')}: {s.get('inferred_problem', '')}")
+            risks = result.get("risks", [])
+            if risks:
+                lines.append(f"风险点({len(risks)}个)：")
+                for r in risks[:3]:
+                    lines.append(f"  - [{r.get('risk_type', '')}/{r.get('severity', '')}] {r.get('description', '')}")
             questions = result.get("questions", {})
             if isinstance(questions, dict):
-                total_q = sum(
-                    len(v) for v in questions.values() if isinstance(v, list)
-                )
-                lines.append(f"已生成题目数：{total_q}")
+                q_lines = []
+                for direction, qs in questions.items():
+                    if isinstance(qs, list) and qs:
+                        q_lines.append(f"  - {direction}: {len(qs)}题")
+                if q_lines:
+                    lines.append("五方向出题：" + "; ".join(q_lines).strip())
+            tips = result.get("preparation_tips", [])
+            if tips:
+                lines.append(f"准备建议({len(tips)}条)")
         return "\n".join(lines)
+
+    def _render_interview_state(self) -> str:
+        """渲染当前模拟面试状态(从 agent.current_interview_state 读取)."""
+        state = self.agent.current_interview_state
+        if not state:
+            return ""
+        result = state.get("result") or {}
+        company = result.get("company_name", "")
+        job = result.get("job_title", "")
+        status = state.get("status", "")
+        lines = [f"当前模拟面试状态：{company} / {job}（状态：{status}）"]
+
+        is_multi = state.get("is_multi_stage", False)
+        stages = state.get("stages") or []
+        stage_idx = state.get("current_stage_index", 0)
+        if is_multi and stages:
+            lines.append(f"多阶段面试，共 {len(stages)} 个阶段，当前第 {stage_idx + 1} 阶段：")
+            for i, s in enumerate(stages):
+                mark = "→" if i == stage_idx else ("✓" if s.get("status") == "completed" else "○")
+                score = s.get("stage_score", 0)
+                turns = len(s.get("turns") or [])
+                lines.append(
+                    f"  {mark} {s.get('stage_name', s.get('stage_type', ''))}"
+                    f"（{s.get('status', '')}，{turns}题，得分{score}）"
+                )
+                # 笔试阶段显示题目
+                if s.get("stage_type") == "written" and s.get("status") == "in_progress":
+                    wqs = s.get("written_questions") or []
+                    if wqs:
+                        lines.append(f"    笔试题({len(wqs)}道)：")
+                        for q in wqs[:5]:
+                            lines.append(f"      - {q.get('title', '')}: {q.get('question', '')[:80]}")
+        else:
+            turns = state.get("turns") or []
+            lines.append(f"单场面试，已完成 {len(turns)} 轮")
+
+        current_q = state.get("current_question")
+        if current_q:
+            lines.append(f"当前题目：{current_q.get('question', '')[:100]}")
+            if current_q.get("focus"):
+                lines.append(f"  考察点：{current_q.get('focus', '')}")
+
+        report = state.get("report")
+        if report:
+            lines.append(f"面试报告已生成，总分：{report.get('overall_score', 0)}")
+
+        return "\n".join(lines)
+
+    def _render_current_request(self, user_message: str, page_context: str) -> str:
+        """渲染当前请求(含页面上下文)."""
+        if page_context:
+            return f"[页面上下文] {page_context}\n\n[用户提问] {user_message}"
+        return user_message
 
     def _render_history(self) -> str:
         """渲染对话历史，保留 recent_window 轮，更老的压缩."""
@@ -180,7 +252,7 @@ class InterviewContextManager:
     def _assemble_prompt(self, sections: Dict[str, Dict]) -> str:
         """把各 section 文本拼成完整 prompt."""
         parts = []
-        for name in ["prefix", "memory", "interview_result", "history", "current_request"]:
+        for name in ["prefix", "interview_result", "interview_state", "history", "current_request"]:
             text = sections[name]["text"]
             if text.strip():
                 parts.append(text)

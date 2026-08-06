@@ -206,7 +206,7 @@ hiremind/
 └── .gitignore
 ```
 
-详细架构说明见 [ARCHITECTURE.md](./ARCHITECTURE.md),核心包架构详解见 [package/ARCHITECTURE.md](./package/ARCHITECTURE.md),运行时数据目录说明见 [RUNTIME_DATA.md](./RUNTIME_DATA.md)。
+详细架构说明见 [ARCHITECTURE.md](docs/ARCHITECTURE.md),核心包架构详解见 [package/ARCHITECTURE.md](./package/ARCHITECTURE.md),运行时数据目录说明见 [RUNTIME_DATA.md](docs/RUNTIME_DATA.md)。
 
 ---
 

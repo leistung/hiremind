@@ -1,18 +1,9 @@
 """Pydantic 模型：定义 HireMind 的输入、输出与中间状态."""
 
 from enum import Enum
-from typing import Annotated, Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
-
-
-def _merge_errors(existing: Optional[str], new: Optional[str]) -> Optional[str]:
-    """LangGraph reducer：合并多个并行节点可能产生的错误信息."""
-    if not new:
-        return existing
-    if not existing:
-        return new
-    return f"{existing}\n{new}"
 
 
 # ── 简历结构化模型 ──
@@ -248,19 +239,7 @@ class PreparationTips(BaseModel):
     tips: List[str] = Field(default_factory=list)
 
 
-# LangGraph 状态模型
-class InterviewState(BaseModel):
-    """LangGraph 状态."""
-
-    input: InterviewInput
-    jd_profile: Optional[JDProfile] = None
-    resume_profile: Optional[ResumeProfile] = None
-    match_analysis: Optional[MatchAnalysis] = None
-    business_scenarios: Optional[List[BusinessScenario]] = None
-    risks: Optional[List[Risk]] = None
-    questions: Optional[InterviewQuestions] = None
-    preparation_tips: Optional[List[str]] = None
-    error: Annotated[Optional[str], _merge_errors] = None
+# 注:LangGraph 工作流状态(分析流状态 / 面试流状态)已迁移到 models/states.py
 
 
 # ── 模拟面试模型 ──
