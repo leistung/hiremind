@@ -285,3 +285,76 @@ body {
   font-weight: 600;
   color: var(--fg);
 }
+.prose-warm blockquote {
+  border-left: 3px solid var(--accent, #ea580c);
+  padding-left: 0.75em;
+  margin: 0.5em 0;
+  color: var(--fg-muted, #78716c);
+}
+.prose-warm hr {
+  border: none;
+  border-top: 1px solid var(--border, #e7e5e4);
+  margin: 1em 0;
+}
+.prose-warm .md-code-block {
+  background: var(--bg-muted, #f5f5f4);
+  border: 1px solid var(--border, #e7e5e4);
+  border-radius: 6px;
+  padding: 0.75em 0.9em;
+  margin: 0.6em 0;
+  overflow-x: auto;
+  font-size: 0.85em;
+  line-height: 1.5;
+}
+.prose-warm .md-code-block code {
+  background: none;
+  padding: 0;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+.prose-warm table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 0.6em 0;
+  font-size: 0.9em;
+}
+.prose-warm th, .prose-warm td {
+  border: 1px solid var(--border, #e7e5e4);
+  padding: 4px 8px;
+  text-align: left;
+  vertical-align: top;
+}
+.prose-warm th {
+  background: var(--bg-muted, #f5f5f4);
+  font-weight: 600;
+}
+/* 对话气泡里的表格:缩小字号 */
+.md-bubble table {
+  font-size: 0.78rem;
+}
+.md-bubble th, .md-bubble td {
+  padding: 3px 6px;
+}
+/* 对话气泡里的 markdown:缩小字号 + 适配气泡宽度 */
+.md-bubble h1, .md-bubble h2, .md-bubble h3 {
+  font-size: 0.95rem;
+  margin-top: 0.6em;
+  margin-bottom: 0.3em;
+}
+.md-bubble h4 {
+  font-size: 0.85rem;
+  margin-top: 0.5em;
+  margin-bottom: 0.2em;
+}
+.md-bubble p {
+  margin: 0.3em 0;
+}
+.md-bubble ul, .md-bubble ol {
+  margin: 0.3em 0;
+  padding-left: 1.3em;
+}
+.md-bubble li {
+  margin: 0.1em 0;
+}
+.md-bubble .md-code-block {
+  font-size: 0.78rem;
+}

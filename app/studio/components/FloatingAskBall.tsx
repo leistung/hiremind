@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { usePathname } from "next/navigation";
 import { api } from "@/lib/api";
+import MarkdownText from "./MarkdownText";
 
 interface ChatMessage {
   role: "user" | "assistant";
@@ -55,8 +56,8 @@ function detectContext(page: string): {
         const ps = JSON.parse(raw);
         analysis_id = ps.analysisId;
         const form = ps.form || {};
-        const company = form.company_name || "";
-        const job = form.job_title || "";
+        const company = form.companyName || "";
+        const job = form.jobTitle || "";
         if (ps.running) {
           context += `，正在进行分析${company ? `（${company}-${job}）` : ""}`;
         } else if (ps.result) {
@@ -89,6 +90,39 @@ function detectContext(page: string): {
         } else {
           context += "，尚未开始面试";
         }
+      }
+    } else if (page === "/resumes") {
+      // 简历页:从 sessionStorage 读取当前查看的简历信息
+      const raw = sessionStorage.getItem("hiremind:resume-state-v1");
+      if (raw) {
+        const ps = JSON.parse(raw);
+        const name = ps.basicsName || ps.name || "";
+        const title = ps.title || "";
+        if (ps.resumeId) {
+          context += `，正在查看简历（ID: ${ps.resumeId}）`;
+          if (name) context += `：${name}`;
+          if (title) context += `（${title}）`;
+        }
+      } else {
+        context += "，尚未选中简历";
+      }
+    } else if (page === "/positions") {
+      // 职位页:从 sessionStorage 读取当前查看的职位信息
+      const raw = sessionStorage.getItem("hiremind:position-state-v1");
+      if (raw) {
+        const ps = JSON.parse(raw);
+        const name = ps.name || "";
+        const company = ps.companyName || "";
+        const jobTitle = ps.jobTitle || "";
+        if (ps.positionId) {
+          context += `，正在查看职位（ID: ${ps.positionId}）`;
+          if (name) context += `：${name}`;
+          if (company || jobTitle) {
+            context += `（${company || "未指定公司"}-${jobTitle || "未指定岗位"}）`;
+          }
+        }
+      } else {
+        context += "，尚未选中职位";
       }
     }
   } catch {
@@ -137,6 +171,7 @@ export default function FloatingAskBall() {
       setMessages((prev) => [...prev, { role: "assistant", content: "" }]);
 
       let assistantIdx = -1;
+      let tokenStarted = false;
       abortRef.current = api.ask(
         msg,
         (payload) => {
@@ -144,10 +179,52 @@ export default function FloatingAskBall() {
             setMessages((prev) => {
               assistantIdx = prev.length - 1;
               const next = [...prev];
-              next[assistantIdx] = { role: "assistant", content: "思考中…" };
+              // 收到 thinking:清空占位内容,等待 token 流式填充
+              next[assistantIdx] = { role: "assistant", content: "" };
               return next;
             });
+          } else if (payload.type === "status") {
+            // 阶段状态(如"正在调用工具"):临时显示,token 开始后会被覆盖
+            if (!tokenStarted) {
+              setMessages((prev) => {
+                const next = [...prev];
+                if (assistantIdx < 0) assistantIdx = next.length - 1;
+                // 仅在内容为空或仍是状态文本时显示
+                next[assistantIdx] = {
+                  role: "assistant",
+                  content: payload.content || "",
+                };
+                return next;
+              });
+            }
+          } else if (payload.type === "token") {
+            // 流式 token:逐字追加到当前 assistant 消息
+            // 首个 token 到达时清掉状态文本,开始填入实际答案
+            if (!tokenStarted) {
+              tokenStarted = true;
+              setMessages((prev) => {
+                const next = [...prev];
+                if (assistantIdx < 0) assistantIdx = next.length - 1;
+                next[assistantIdx] = {
+                  role: "assistant",
+                  content: payload.content || "",
+                };
+                return next;
+              });
+            } else {
+              setMessages((prev) => {
+                const next = [...prev];
+                if (assistantIdx < 0) assistantIdx = next.length - 1;
+                const cur = next[assistantIdx];
+                next[assistantIdx] = {
+                  role: "assistant",
+                  content: (cur.content || "") + (payload.content || ""),
+                };
+                return next;
+              });
+            }
           } else if (payload.type === "answer") {
+            // 最终完整答案:覆盖(确保一致性,兼容非流式场景)
             setMessages((prev) => {
               const next = [...prev];
               if (assistantIdx < 0) assistantIdx = next.length - 1;
@@ -364,9 +441,16 @@ export default function FloatingAskBall() {
                           : { borderColor: "var(--border)" }
                       }
                     >
-                      <div className="whitespace-pre-wrap break-words">
-                        {msg.content || "…"}
-                      </div>
+                      {msg.role === "assistant" && !msg.error ? (
+                        <MarkdownText
+                          content={msg.content || "…"}
+                          className="md-bubble break-words"
+                        />
+                      ) : (
+                        <div className="whitespace-pre-wrap break-words">
+                          {msg.content || "…"}
+                        </div>
+                      )}
                     </div>
                   </div>
                 ))}

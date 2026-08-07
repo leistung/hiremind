@@ -17,6 +17,7 @@ import type {
   ResumeData,
   ResumeListItem,
   AnalysisSummary,
+  NodeIORecord,
   StreamAnalysisProgress,
 } from "@/lib/types";
 
@@ -85,6 +86,7 @@ function AnalysisPageInner() {
   const [fullscreen, setFullscreen] = useState(false);
   // 流式进度:已完成节点 + 当前节点
   const [progress, setProgress] = useState<StreamAnalysisProgress | null>(null);
+  const [nodeIO, setNodeIO] = useState<NodeIORecord[]>([]);
   // 本次分析启动时使用的模型(从后端 response/detail 读取,运行中不随全局配置变化)
   const [analysisModel, setAnalysisModel] = useState("");
 
@@ -244,13 +246,17 @@ function AnalysisPageInner() {
     const abort = api.streamAnalysis(knownAid, (payload) => {
       if (payload.progress) {
         setProgress(payload.progress);
+        // 同步更新 nodeIO,让进行中的节点卡片可点击查看实时输出
+        if (payload.node_io) {
+          setNodeIO(payload.node_io);
+        }
       }
       if (payload.status === "completed" && payload.result) {
         setResult(payload.result);
         setAnalysisId(knownAid);
         setRunning(false);
         setError("");
-        setProgress(null);
+        setNodeIO(payload.node_io || []);
         streamAbortRef.current = null;
       } else if (payload.status === "error") {
         setRunning(false);
@@ -390,6 +396,7 @@ function AnalysisPageInner() {
     setResult(null);
     setAnalysisId("");
     setProgress({ completed: [], current: null });
+    setNodeIO([]);
     // 立即持久化 running=true + 开始时间,确保切换页面后能恢复
     try {
       const ps: PersistedState = {
@@ -546,6 +553,7 @@ function AnalysisPageInner() {
         setResult(r.result);
         setAnalysisId(aid);
         setAnalysisModel(r.model || "");
+        setNodeIO(r.node_io || []);
         setError("");
       } else if (r.status === "error") {
         setError(r.error || "该分析失败");
@@ -941,18 +949,7 @@ function AnalysisPageInner() {
               </div>
 
               {/* 节点进度列表 */}
-              <AnalysisProgress progress={progress} />
-
-              {/* 当前节点提示 */}
-              {progress?.current && (
-                <div
-                  className="mt-4 px-4 py-3 rounded-lg text-[13px] flex items-center gap-2"
-                  style={{ background: "var(--accent-bg)", color: "var(--accent)" }}
-                >
-                  <div className="w-3 h-3 rounded-full border-2 border-orange-300 border-t-orange-600 animate-spin shrink-0" />
-                  <span className="flex-1">正在执行:<span className="font-semibold">{progress.current}</span></span>
-                </div>
-              )}
+              <AnalysisProgress progress={progress} nodeIO={nodeIO} />
             </div>
           </div>
         )}
@@ -1157,91 +1154,536 @@ function AnalysisIdBar({ id }: { id: string }) {
 }
 
 // ── 分析进度展示:SSE 推送的已完成节点列表 ──
-const TOTAL_NODES = [
-  { node: "parse_jd", label: "解析岗位要求" },
-  { node: "parse_resume", label: "解析简历" },
-  { node: "analyze_match", label: "匹配度分析" },
-  { node: "infer_scenarios", label: "推断业务场景" },
-  { node: "identify_risks", label: "识别风险点" },
-  { node: "generate_questions", label: "生成面试题" },
-  { node: "generate_tips", label: "生成准备建议" },
+// 分析图节点分组(反映实际并行结构)
+const NODE_GROUPS: { nodes: { node: string; label: string }[]; desc: string }[] = [
+  {
+    nodes: [
+      { node: "parse_jd", label: "解析岗位要求" },
+      { node: "parse_resume", label: "解析简历" },
+    ],
+    desc: "并行解析",
+  },
+  {
+    nodes: [
+      { node: "analyze_match", label: "匹配度分析" },
+      { node: "infer_scenarios", label: "推断业务场景" },
+      { node: "identify_risks", label: "识别风险点" },
+    ],
+    desc: "并行分析",
+  },
+  {
+    nodes: [{ node: "generate_questions", label: "生成面试题" }],
+    desc: "出题",
+  },
+  {
+    nodes: [{ node: "generate_tips", label: "生成准备建议" }],
+    desc: "建议",
+  },
 ];
 
-function AnalysisProgress({ progress }: { progress: StreamAnalysisProgress | null }) {
+function AnalysisProgress({
+  progress,
+  nodeIO,
+}: {
+  progress: StreamAnalysisProgress | null;
+  nodeIO: NodeIORecord[];
+}) {
+  const [selectedNode, setSelectedNode] = useState<string | null>(null);
   const completed = progress?.completed || [];
   const completedNodes = new Set(completed.map((c) => c.node));
-  // current 仅对"未在 completed 列表中"的节点生效,避免同一节点同时显示已完成和进行中
-  const currentLabel = progress?.current || null;
+  const selectedIO = nodeIO.find((r) => r.node === selectedNode);
+
+  // 基于拓扑推断 isCurrent:某组 isCurrent 当且仅当该组未全完成且前面所有组都全完成
+  // 不依赖后端 current 字段(它语义是"刚完成的节点",不是"进行中")
+  const isGroupDone = (gIdx: number) =>
+    NODE_GROUPS[gIdx].nodes.every((n) => completedNodes.has(n.node));
+  const isGroupCurrent = (gIdx: number) => {
+    if (isGroupDone(gIdx)) return false;
+    for (let i = 0; i < gIdx; i++) {
+      if (!isGroupDone(i)) return false;
+    }
+    return true;
+  };
 
   return (
-    <div className="space-y-2">
-      {TOTAL_NODES.map((item, idx) => {
-        const isDone = completedNodes.has(item.node);
-        // 已完成节点不再判定为 current
-        const isCurrent = !isDone && currentLabel === item.label;
-        const isPending = !isDone && !isCurrent;
+    <div className="space-y-3">
+      {NODE_GROUPS.map((group, gIdx) => {
+        const groupDone = isGroupDone(gIdx);
+        const groupActive = isGroupCurrent(gIdx);
 
         return (
-          <div
-            key={item.node}
-            className="card p-3 flex items-center gap-3 transition-all"
-            style={{
-              opacity: isPending ? 0.5 : 1,
-              background: isDone
-                ? "var(--success-soft)"
-                : isCurrent
-                  ? "var(--accent-bg)"
-                  : "var(--bg-elevated)",
-            }}
-          >
-            {/* 状态图标 */}
-            <div className="shrink-0">
-              {isDone ? (
-                <div
-                  className="w-7 h-7 rounded-full flex items-center justify-center"
-                  style={{ background: "var(--success)" }}
-                >
-                  <svg className="w-4 h-4 text-white" fill="none" stroke="currentColor" strokeWidth={3} viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-                  </svg>
-                </div>
-              ) : isCurrent ? (
-                <div className="w-7 h-7 rounded-full border-2 border-orange-300 border-t-orange-600 animate-spin" />
-              ) : (
-                <div
-                  className="w-7 h-7 rounded-full flex items-center justify-center text-[12px] font-semibold"
-                  style={{ background: "var(--bg-muted)", color: "var(--fg-muted)" }}
-                >
-                  {idx + 1}
-                </div>
-              )}
-            </div>
-
-            {/* 节点信息 */}
-            <div className="flex-1 min-w-0">
+          <div key={gIdx}>
+            {/* 组标签 */}
+            <div className="flex items-center gap-2 mb-1.5">
               <div
-                className="text-[13px] font-medium"
+                className="text-[10px] font-medium px-1.5 py-0.5 rounded"
                 style={{
-                  color: isDone ? "var(--success)" : isCurrent ? "var(--accent)" : "var(--fg-muted)",
+                  background: groupDone
+                    ? "var(--success-soft)"
+                    : groupActive
+                      ? "var(--accent-bg)"
+                      : "var(--bg-muted)",
+                  color: groupDone
+                    ? "var(--success)"
+                    : groupActive
+                      ? "var(--accent)"
+                      : "var(--fg-muted)",
                 }}
               >
-                {item.label}
+                {group.desc}
               </div>
-              {isCurrent && (
-                <div className="text-[11px] text-stone-500 mt-0.5">进行中…</div>
-              )}
-              {isDone && (
-                <div className="text-[11px] text-stone-500 mt-0.5">已完成</div>
+              {groupDone && (
+                <svg className="w-3 h-3" style={{ color: "var(--success)" }} fill="none" stroke="currentColor" strokeWidth={3} viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                </svg>
               )}
             </div>
+            {/* 并行节点行 */}
+            <div
+              className="grid gap-2"
+              style={{
+                gridTemplateColumns: `repeat(${group.nodes.length}, minmax(0, 1fr))`,
+              }}
+            >
+              {group.nodes.map((item) => {
+                const isDone = completedNodes.has(item.node);
+                // isCurrent:所在组正在进行(前驱组全完成 && 本组未全完成)且自身未完成
+                const isCurrent = !isDone && groupActive;
+                const isPending = !isDone && !isCurrent;
+                const hasIO = nodeIO.some((r) => r.node === item.node);
 
-            {/* 节点序号 */}
-            <div className="text-[11px] text-stone-400 shrink-0">
-              {idx + 1} / {TOTAL_NODES.length}
+                return (
+                  <div
+                    key={item.node}
+                    onClick={() => {
+                      if (hasIO) setSelectedNode(item.node);
+                    }}
+                    className="card p-2.5 flex flex-col items-center gap-1.5 transition-all text-center"
+                    style={{
+                      opacity: isPending ? 0.45 : 1,
+                      cursor: hasIO ? "pointer" : "default",
+                      background: isDone
+                        ? "var(--success-soft)"
+                        : isCurrent
+                          ? "var(--accent-bg)"
+                          : "var(--bg-elevated)",
+                      borderColor: isCurrent ? "var(--accent)" : "var(--border)",
+                    }}
+                  >
+                    {/* 状态图标 */}
+                    <div className="shrink-0">
+                      {isDone ? (
+                        <div
+                          className="w-6 h-6 rounded-full flex items-center justify-center"
+                          style={{ background: "var(--success)" }}
+                        >
+                          <svg className="w-3.5 h-3.5 text-white" fill="none" stroke="currentColor" strokeWidth={3} viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                          </svg>
+                        </div>
+                      ) : isCurrent ? (
+                        <div className="w-6 h-6 rounded-full border-2 border-orange-300 border-t-orange-600 animate-spin" />
+                      ) : (
+                        <div
+                          className="w-6 h-6 rounded-full flex items-center justify-center"
+                          style={{ background: "var(--bg-muted)" }}
+                        >
+                          <div className="w-2 h-2 rounded-full" style={{ background: "var(--fg-muted)" }} />
+                        </div>
+                      )}
+                    </div>
+                    {/* 标签 */}
+                    <div
+                      className="text-[11px] font-medium leading-tight"
+                      style={{
+                        color: isDone
+                          ? "var(--success)"
+                          : isCurrent
+                            ? "var(--accent)"
+                            : "var(--fg-muted)",
+                      }}
+                    >
+                      {item.label}
+                    </div>
+                    {/* 状态文字 */}
+                    <div className="text-[9px] text-stone-400">
+                      {isDone ? "已完成" : isCurrent ? "进行中…" : "等待中"}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
+            {/* 组间连接线 */}
+            {gIdx < NODE_GROUPS.length - 1 && (
+              <div className="flex justify-center my-1">
+                <svg className="w-4 h-4 text-stone-300" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M19 14l-7 7m0 0l-7-7m7 7V3" />
+                </svg>
+              </div>
+            )}
           </div>
         );
       })}
+
+      {/* 节点详情弹窗 */}
+      {selectedNode && selectedIO && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          style={{ background: "rgba(0,0,0,0.4)" }}
+          onClick={() => setSelectedNode(null)}
+        >
+          <div
+            className="rounded-xl shadow-2xl max-w-2xl w-full max-h-[80vh] flex flex-col overflow-hidden"
+            style={{ background: "var(--bg-elevated, white)" }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* 弹窗头 */}
+            <div
+              className="flex items-center justify-between px-4 py-3 border-b shrink-0"
+              style={{ borderColor: "var(--border)" }}
+            >
+              <div className="flex items-center gap-2">
+                <div
+                  className="w-6 h-6 rounded-full flex items-center justify-center"
+                  style={{ background: "var(--success)" }}
+                >
+                  <svg className="w-3.5 h-3.5 text-white" fill="none" stroke="currentColor" strokeWidth={3} viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                  </svg>
+                </div>
+                <div>
+                  <div className="text-sm font-semibold">{selectedIO.label}</div>
+                  <div className="text-[10px] text-stone-400 font-mono">{selectedIO.node}</div>
+                </div>
+              </div>
+              <button
+                onClick={() => setSelectedNode(null)}
+                className="w-7 h-7 flex items-center justify-center rounded-md text-stone-400 hover:text-stone-700 hover:bg-stone-100"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            {/* 弹窗内容:节点输出(结构化分行展示) */}
+            <div className="flex-1 overflow-y-auto p-4">
+              <div className="text-[11px] text-stone-400 mb-2">节点输出</div>
+              <div
+                className="rounded-lg overflow-y-auto"
+                style={{
+                  background: "var(--bg-muted, #f5f5f4)",
+                  maxHeight: "420px",
+                }}
+              >
+                <NodeOutputView output={selectedIO.output} />
+              </div>
+            </div>
+            {/* 弹窗底栏 */}
+            <div
+              className="px-4 py-2 border-t text-[10px] text-stone-400 shrink-0"
+              style={{ borderColor: "var(--border)" }}
+            >
+              完成时间:{selectedIO.ts}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── 节点输出结构化展示 ──
+// 把 Python repr / JSON 字符串解析成分行展示,不同属性间有间距
+
+// 从 Python repr 字符串中提取字段: field_name=value field2=value2
+function parsePythonRepr(text: string): { key: string; raw: string }[] {
+  const fields: { key: string; raw: string }[] = [];
+  // 匹配 标识符= 的位置(排除字符串内部的等号)
+  const regex = /([a-zA-Z_]\w*)=/g;
+  const positions: { key: string; valueStart: number }[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(text)) !== null) {
+    // 检查等号前是否在引号内(粗略:统计前面的引号数)
+    const before = text.slice(0, match.index);
+    const singleQuotes = (before.match(/'/g) || []).length;
+    const doubleQuotes = (before.match(/"/g) || []).length;
+    // 奇数引号说明在字符串内部,跳过
+    if (singleQuotes % 2 === 1 || doubleQuotes % 2 === 1) continue;
+    positions.push({ key: match[1], valueStart: match.index + match[0].length });
+  }
+  if (positions.length === 0) return [];
+  for (let i = 0; i < positions.length; i++) {
+    const valueStart = positions[i].valueStart;
+    // 值的结束位置:下一个字段名开始处(减去 key= 的长度)
+    const valueEnd = i + 1 < positions.length
+      ? positions[i + 1].valueStart - (positions[i + 1].key.length + 1)
+      : text.length;
+    let raw = text.slice(valueStart, valueEnd).trim();
+    // 去掉末尾的多余空格和换行
+    raw = raw.replace(/[\s]+$/, "");
+    fields.push({ key: positions[i].key, raw });
+  }
+  return fields;
+}
+
+// 从 Python 列表字符串 ['a', 'b'] 中提取元素
+function parsePythonList(text: string): string[] {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) return [];
+  const inner = trimmed.slice(1, -1);
+  // 按 ',' 分割,但要处理引号内的逗号
+  const items: string[] = [];
+  let current = "";
+  let inSingle = false, inDouble = false;
+  for (let i = 0; i < inner.length; i++) {
+    const ch = inner[i];
+    if (ch === "'" && !inDouble) { inSingle = !inSingle; continue; }
+    if (ch === '"' && !inSingle) { inDouble = !inDouble; continue; }
+    if (ch === "," && !inSingle && !inDouble) {
+      const item = current.trim();
+      if (item) items.push(item);
+      current = "";
+    } else {
+      current += ch;
+    }
+  }
+  const last = current.trim();
+  if (last) items.push(last);
+  return items;
+}
+
+// 清理值的引号和转义
+function cleanValue(raw: string): string {
+  let v = raw.trim();
+  // 去掉外层引号
+  if ((v.startsWith("'") && v.endsWith("'")) || (v.startsWith('"') && v.endsWith('"'))) {
+    v = v.slice(1, -1);
+  }
+  // 反转义
+  v = v.replace(/\\'/g, "'").replace(/\\"/g, '"').replace(/\\n/g, "\n");
+  return v;
+}
+
+function NodeOutputView({ output }: { output: Record<string, unknown> }) {
+  const entries = Object.entries(output);
+  if (entries.length === 0) {
+    return <div className="p-3 text-[12px] text-stone-400">(空)</div>;
+  }
+  return (
+    <div className="p-3 space-y-4">
+      {entries.map(([key, value], idx) => (
+        <div key={idx}>
+          {/* 顶层字段名 */}
+          <div
+            className="text-[11px] font-semibold mb-1.5 pb-1"
+            style={{
+              color: "var(--accent, #c2410c)",
+              borderBottom: "1px solid var(--border, #e7e5e4)",
+            }}
+          >
+            {key}
+          </div>
+          <FieldValue value={value} />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// 渲染单个字段的值:支持 dict / list / string / number
+function FieldValue({ value }: { value: unknown }) {
+  // null / undefined
+  if (value === null || value === undefined) {
+    return <div className="text-[11px] text-stone-400">—</div>;
+  }
+
+  // 字典:递归展示各字段
+  if (typeof value === "object" && !Array.isArray(value)) {
+    const entries = Object.entries(value as Record<string, unknown>);
+    if (entries.length === 0) {
+      return <div className="text-[11px] text-stone-400">{"{}"}</div>;
+    }
+    return (
+      <div className="space-y-2">
+        {entries.map(([k, v], i) => (
+          <SubField key={i} fieldKey={k} value={v} />
+        ))}
+      </div>
+    );
+  }
+
+  // 列表
+  if (Array.isArray(value)) {
+    if (value.length === 0) {
+      return <div className="text-[11px] text-stone-400">{"[]"}</div>;
+    }
+    // 判断元素是否为对象(dict):是则用卡片样式,元素间有明显分隔
+    const isObjectList = value.some(
+      (item) => typeof item === "object" && item !== null && !Array.isArray(item)
+    );
+    if (isObjectList) {
+      return (
+        <div className="space-y-3">
+          {value.map((item, i) => (
+            <div
+              key={i}
+              className="p-2.5 rounded-md"
+              style={{
+                background: "var(--bg-elevated, #ffffff)",
+                border: "1px solid var(--border, #e7e5e4)",
+              }}
+            >
+              <FieldValue value={item} />
+            </div>
+          ))}
+        </div>
+      );
+    }
+    // 基本类型列表:bullet 样式
+    return (
+      <ul className="space-y-1.5">
+        {value.map((item, i) => (
+          <li key={i} className="flex gap-1.5 text-[11px] leading-relaxed">
+            <span className="shrink-0" style={{ color: "var(--accent, #c2410c)" }}>•</span>
+            <div className="flex-1">
+              <FieldValue value={item} />
+            </div>
+          </li>
+        ))}
+      </ul>
+    );
+  }
+
+  // 纯文本 / 数字
+  const text = String(value);
+  // 如果是 Python repr 字符串(旧数据兼容),尝试解析
+  if (typeof value === "string" && text.includes("=") && /[a-zA-Z_]\w*=/.test(text)) {
+    const fields = parsePythonRepr(text);
+    if (fields.length > 0) {
+      return (
+        <div className="space-y-2">
+          {fields.map((f, i) => (
+            <SubField key={i} fieldKey={f.key} rawValue={f.raw} />
+          ))}
+        </div>
+      );
+    }
+  }
+  return (
+    <div
+      className="text-[11px] leading-relaxed whitespace-pre-wrap break-all"
+      style={{ color: "var(--fg, #292524)" }}
+    >
+      {text}
+    </div>
+  );
+}
+
+// 子字段:字段名 + 值
+function SubField({ fieldKey, value, rawValue }: { fieldKey: string; value?: unknown; rawValue?: string }) {
+  // 优先用结构化 value,兼容旧数据的 rawValue 字符串
+  const displayValue = value !== undefined ? value : rawValue;
+
+  // 结构化值
+  if (value !== undefined) {
+    if (value === null) {
+      return (
+        <div className="flex gap-2 text-[11px] leading-relaxed">
+          <span className="font-medium text-stone-500 shrink-0">{fieldKey}:</span>
+          <span className="text-stone-400">—</span>
+        </div>
+      );
+    }
+    if (Array.isArray(value)) {
+      // 判断元素是否为对象(dict):是则用卡片样式
+      const isObjectList = value.some(
+        (item) => typeof item === "object" && item !== null && !Array.isArray(item)
+      );
+      return (
+        <div>
+          <div className="text-[10px] font-medium text-stone-500 mb-1">{fieldKey}</div>
+          {value.length === 0 ? (
+            <div className="text-[11px] text-stone-400 ml-2">{"[]"}</div>
+          ) : isObjectList ? (
+            <div className="space-y-2 ml-2">
+              {value.map((item, i) => (
+                <div
+                  key={i}
+                  className="p-2 rounded-md"
+                  style={{
+                    background: "var(--bg-elevated, #ffffff)",
+                    border: "1px solid var(--border, #e7e5e4)",
+                  }}
+                >
+                  <FieldValue value={item} />
+                </div>
+              ))}
+            </div>
+          ) : (
+            <ul className="space-y-1 ml-2">
+              {value.map((item, i) => (
+                <li key={i} className="flex gap-1.5 text-[11px] leading-relaxed">
+                  <span className="shrink-0" style={{ color: "var(--accent, #c2410c)" }}>•</span>
+                  <div className="flex-1">
+                    <FieldValue value={item} />
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      );
+    }
+    if (typeof value === "object") {
+      const entries = Object.entries(value as Record<string, unknown>);
+      return (
+        <div>
+          <div className="text-[10px] font-medium text-stone-500 mb-1">{fieldKey}</div>
+          <div className="ml-2 space-y-1.5">
+            {entries.map(([k, v], i) => (
+              <SubField key={i} fieldKey={k} value={v} />
+            ))}
+          </div>
+        </div>
+      );
+    }
+    // 基本类型
+    return (
+      <div className="flex gap-2 text-[11px] leading-relaxed">
+        <span className="font-medium text-stone-500 shrink-0">{fieldKey}:</span>
+        <span className="flex-1 whitespace-pre-wrap break-all" style={{ color: "var(--fg, #292524)" }}>
+          {String(value)}
+        </span>
+      </div>
+    );
+  }
+
+  // 旧数据兼容:rawValue 是字符串
+  const trimmed = (rawValue || "").trim();
+  if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+    const items = parsePythonList(trimmed);
+    if (items.length > 0) {
+      return (
+        <div>
+          <div className="text-[10px] font-medium text-stone-500 mb-1">{fieldKey}</div>
+          <ul className="space-y-1 ml-2">
+            {items.map((item, i) => (
+              <li key={i} className="flex gap-1.5 text-[11px] leading-relaxed">
+                <span className="shrink-0" style={{ color: "var(--accent, #c2410c)" }}>•</span>
+                <span className="flex-1 whitespace-pre-wrap break-all">{cleanValue(item)}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      );
+    }
+  }
+  return (
+    <div className="flex gap-2 text-[11px] leading-relaxed">
+      <span className="font-medium text-stone-500 shrink-0">{fieldKey}:</span>
+      <span className="flex-1 whitespace-pre-wrap break-all" style={{ color: "var(--fg, #292524)" }}>
+        {cleanValue(trimmed)}
+      </span>
     </div>
   );
 }

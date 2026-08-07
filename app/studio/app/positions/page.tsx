@@ -123,6 +123,27 @@ function PositionsPage() {
         job_requirements: r.position.job_requirements,
         notes: r.position.notes,
       });
+      // 同步 URL 参数,让 Ask 助手能定位到当前查看的职位
+      // 用 replaceState 避免触发 Next.js 路由重新渲染/滚动
+      const url = new URL(window.location.href);
+      if (url.searchParams.get("position") !== id) {
+        url.searchParams.set("position", id);
+        window.history.replaceState(null, "", url);
+      }
+      // 写入 sessionStorage 供 Ask 助手读取当前查看的职位信息
+      try {
+        sessionStorage.setItem(
+          "hiremind:position-state-v1",
+          JSON.stringify({
+            positionId: id,
+            name: r.position.name,
+            companyName: r.position.company_name || "",
+            jobTitle: r.position.job_title || "",
+          }),
+        );
+      } catch {
+        // sessionStorage 写入失败不影响主流程
+      }
     } catch {
       setError("加载职位详情失败");
     }

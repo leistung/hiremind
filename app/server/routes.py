@@ -248,13 +248,10 @@ def run_analysis(req: AnalysisRequest):
                         "completed": list(completed_nodes),
                         "current": label if node_name != "done" else None,
                     }
-                    # 同步更新 agent 的内存副本,避免最终保存时覆盖 progress 字段
+                    # 同步更新内存副本(progress + node_io 已由 tools 实时设置)
                     agent.analysis["progress"] = progress
-                    # 写入磁盘供 SSE 端点轮询读取
-                    a = analysis_store.load(analysis_id)
-                    if a is not None:
-                        a["progress"] = progress
-                        analysis_store.save(a)
+                    # 直接保存内存对象,不从磁盘重新加载避免竞态
+                    agent.analysis_store.save(agent.analysis)
 
                 run_analysis_with_progress(agent, params, on_progress=_on_progress)
             except Exception as exc:
@@ -375,6 +372,7 @@ async def get_analysis(analysis_id: str):
         error=analysis.get("error") if status == "error" else None,
         model=analysis.get("model", "") or "",
         metadata=analysis.get("metadata", {}) or {},
+        node_io=analysis.get("node_io") or [],
     )
 
 
@@ -444,6 +442,7 @@ async def stream_analysis_progress(analysis_id: str):
                 payload = {
                     "status": status,
                     "progress": progress,
+                    "node_io": analysis.get("node_io") or [],
                 }
                 # 完成时附带最终结果
                 if status == "completed":
@@ -461,6 +460,7 @@ async def stream_analysis_progress(analysis_id: str):
                 payload = {"status": status}
                 if status == "completed":
                     payload["result"] = analysis.get("interview_result")
+                    payload["node_io"] = analysis.get("node_io") or []
                 elif status in ("error", "cancelled"):
                     payload["error"] = analysis.get("error") or ("已取消" if status == "cancelled" else "分析失败")
                 yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
@@ -1188,7 +1188,20 @@ async def ask_agent(req: AskRequest):
 
     def _run_ask():
         try:
-            answer = agent.ask(message, page_context=page_context)
+            # on_token 回调:模型流式输出的每个 token 推入 queue
+            def _on_token(token: str):
+                queue.put({"type": "token", "content": token})
+
+            # on_status 回调:推送阶段状态(工具调用等)
+            def _on_status(status: str):
+                queue.put({"type": "status", "content": status})
+
+            answer = agent.ask(
+                message,
+                page_context=page_context,
+                on_token=_on_token,
+                on_status=_on_status,
+            )
             queue.put({"type": "answer", "content": answer})
         except Exception as exc:
             queue.put({"type": "error", "content": str(exc)})

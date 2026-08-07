@@ -28,6 +28,8 @@ from .models.schemas import (
 )
 from .nodes.interview_nodes import DEFAULT_STAGE_CONFIGS
 from .store.ask_store import AskState, AskStore
+from .store.position_store import PositionStore
+from .store.resume_store import ResumeStore
 from .tools import TOOL_SPECS, build_tool_registry, validate_tool
 from .workspace import HireMindWorkspace
 
@@ -79,6 +81,9 @@ class HireMindAgent:
         self.graph = self.analysis_graph
         # 模拟面试会话存储
         self.interview_store = InterviewStore(workspace.interviews_dir)
+        # 简历/职位存储(供 ask 工具读取当前查看的简历/职位详情)
+        self.resume_store = ResumeStore(workspace.resumes_dir)
+        self.position_store = PositionStore(workspace.positions_dir)
         self.tools_spec = TOOL_SPECS
         self.tools = build_tool_registry(self)
 
@@ -92,19 +97,25 @@ class HireMindAgent:
         # ask 上下文:当前模拟面试状态(由 ask 路由按 interview_id 加载,仅供 context_manager 渲染)
         self.current_interview_state: Optional[Dict[str, Any]] = None
         self.last_prompt_metadata: Optional[Dict[str, Any]] = None
+        # ask 上下文:暂存当前 page_context(供 read_position/read_resume 工具提取 ID)
+        self._current_page_context: str = ""
 
     # ── 核心入口 ──
 
-    def ask(self, user_message: str, page_context: str = "") -> str:
+    def ask(self, user_message: str, page_context: str = "", on_token=None, on_status=None) -> str:
         """执行一次完整 agent 回合.
 
         page_context: 前端传入的页面上下文(当前页面 + 业务状态摘要),
         注入 prompt 让 agent 知道用户在做什么。
+        on_token: 可选回调 (token: str) -> None,流式推送最终答案的每个 token。
+        on_status: 可选回调 (status: str) -> None,推送阶段状态(如"正在调用工具")。
         """
         # 1. 记 history + 创建 AskState
         self._record_history("user", user_message)
         task_state = AskState.create(user_message)
         self.current_task_state = task_state
+        # 暂存 page_context 供工具函数读取(如 read_position/read_resume 从中提取 ID)
+        self._current_page_context = page_context
         self.ask_store.start_run(task_state)
 
         retries = 0
@@ -124,13 +135,9 @@ class HireMindAgent:
             task_state.record_attempt()
             self.ask_store.append_trace(task_state, "prompt_built", metadata)
 
-            # 调模型
+            # 流式调模型:边接收边判断是否为纯文本答案
             try:
-                response = self.model_client.invoke([
-                    SystemMessage(content="你是 HireMind 面试分析助手。"),
-                    HumanMessage(content=prompt),
-                ])
-                raw_output = response.content if hasattr(response, "content") else str(response)
+                raw_output = self._stream_model(prompt, on_token)
             except Exception as exc:
                 task_state.stop_model_error(str(exc))
                 self.ask_store.append_trace(task_state, "model_error", {"error": str(exc)})
@@ -146,6 +153,8 @@ class HireMindAgent:
             if kind == "tool":
                 tool_name = payload.get("name", "")
                 tool_args = payload.get("args", {})
+                if on_status:
+                    on_status(f"正在调用工具 {tool_name}…")
                 self.ask_store.append_trace(task_state, "tool_called", {
                     "name": tool_name,
                     "args": tool_args,
@@ -187,6 +196,46 @@ class HireMindAgent:
         self._finalize_run(task_state, fallback)
         return fallback
 
+    def _stream_model(self, prompt: str, on_token=None) -> str:
+        """流式调用模型,返回完整输出.
+
+        策略:先缓冲前若干字符判断是 JSON(工具/重试) 还是纯文本答案。
+        - 纯文本答案:边接收边通过 on_token 推送,实现逐字流式显示。
+        - JSON:累积完整输出不推送(工具调用不需要显示给用户)。
+        """
+        raw_output = ""
+        is_text_answer = False
+        buffer = ""
+        # 缓冲区大小:超过这么多字符且仍以 { 开头,认为是 JSON
+        PROBE_LEN = 3
+
+        for chunk in self.model_client.stream([
+            SystemMessage(content="你是 HireMind 面试分析助手。"),
+            HumanMessage(content=prompt),
+        ]):
+            chunk_text = chunk.content if hasattr(chunk, "content") else str(chunk)
+            if not chunk_text:
+                continue
+
+            raw_output += chunk_text
+
+            if not is_text_answer:
+                buffer += chunk_text
+                stripped = buffer.lstrip()
+                if stripped and not stripped.startswith("{"):
+                    # 纯文本答案:把已缓冲的内容推送出去,后续直接推送
+                    is_text_answer = True
+                    if on_token:
+                        on_token(buffer)
+                    buffer = ""
+                # 如果以 { 开头,继续累积(可能是工具/重试 JSON)
+            else:
+                # 纯文本模式,直接推送每个 chunk
+                if on_token:
+                    on_token(chunk_text)
+
+        return raw_output
+
     # ── 工具执行 ──
 
     def run_tool(self, name: str, args: Dict[str, Any]) -> str:
@@ -213,8 +262,17 @@ class HireMindAgent:
     # ── 解析 ──
 
     def _parse(self, raw: str) -> tuple[str, Dict[str, Any]]:
-        """解析模型输出为 tool / final / retry."""
-        # 尝试提取 JSON
+        """解析模型输出为 tool / final / retry.
+
+        新规则:纯文本(不以 { 开头)直接作为 final 答案;
+        以 { 开头的才尝试解析为 JSON(tool/retry)。
+        """
+        stripped = raw.lstrip()
+        # 不以 { 开头:纯文本答案
+        if not stripped.startswith("{"):
+            return "final", {"answer": raw}
+
+        # 以 { 开头:尝试解析为 JSON
         json_str = self._extract_json(raw)
         if json_str:
             try:
@@ -229,20 +287,19 @@ class HireMindAgent:
             except json.JSONDecodeError:
                 pass
 
-        # 无法解析为结构化 JSON，当作 final 直接返回原文
+        # JSON 解析失败,当作 final 直接返回原文
         return "final", {"answer": raw}
 
     def _extract_json(self, text: str) -> Optional[str]:
-        """从文本中提取 JSON 块."""
+        """从文本中提取 JSON 块(仅当文本以 { 开头时)."""
+        stripped = text.lstrip()
+        if not stripped.startswith("{"):
+            return None
         # 尝试 ```json ... ``` 格式
         match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
         if match:
             return match.group(1)
-        # 尝试直接找 { ... }
-        match = re.search(r'\{[^{}]*"action"[^{}]*\}', text, re.DOTALL)
-        if match:
-            return match.group(0)
-        # 尝试更宽泛的匹配
+        # 匹配第一个完整的 {...}
         start = text.find("{")
         if start != -1:
             depth = 0

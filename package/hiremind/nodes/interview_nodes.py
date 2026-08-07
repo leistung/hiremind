@@ -863,6 +863,7 @@ def submit_written_node(state: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "stages": stages,
         "turns": [t.model_dump() for t in turns],
+        "status": "evaluated",
         "node_io": node_io,
         "output": {
             "turns": [t.model_dump() for t in stage_turns],

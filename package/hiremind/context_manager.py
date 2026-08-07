@@ -38,9 +38,9 @@ AGENT_PREFIX = """你是 HireMind，一个专业的 AI 面试分析助手。
 {tool_descriptions}
 
 输出格式规则：
-- 如果需要调用工具，输出 JSON：{{"action": "tool", "name": "<tool_name>", "args": {{...}}}}
-- 如果已经得到足够信息可以直接回答用户，输出：{{"action": "final", "answer": "<你的回答>"}}
-- 如果信息不足需要用户补充，输出：{{"action": "retry", "message": "<需要什么信息>"}}
+- 如果需要调用工具，输出 JSON（以 {{ 开头）：{{"action": "tool", "name": "<tool_name>", "args": {{...}}}}
+- 如果信息不足需要用户补充，输出 JSON（以 {{ 开头）：{{"action": "retry", "message": "<需要什么信息>"}}
+- 如果已经得到足够信息可以直接回答用户，直接输出纯文本回答（不要用 JSON 包裹，不要以 {{ 开头），这样可以流式显示给用户
 """
 
 

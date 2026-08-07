@@ -304,6 +304,14 @@ export interface AnalysisSummary {
   metadata: Record<string, unknown>;
 }
 
+// 节点 IO 记录(分析图每个节点的产出)
+export interface NodeIORecord {
+  node: string;
+  label: string;
+  output: Record<string, unknown>;
+  ts: string;
+}
+
 export interface AnalysisDetail {
   success: boolean;
   analysis_id: string;
@@ -315,6 +323,7 @@ export interface AnalysisDetail {
   error?: string;
   model?: string;
   metadata?: Record<string, unknown>;
+  node_io?: NodeIORecord[];
 }
 
 // SSE 流式进度事件:后端 stream_analysis_progress 推送的 payload
@@ -327,6 +336,7 @@ export interface StreamAnalysisEvent {
   progress?: StreamAnalysisProgress;
   result?: InterviewResult;
   error?: string;
+  node_io?: NodeIORecord[];
 }
 
 export interface InterviewReportDetail {

@@ -7,6 +7,7 @@ HireMind 的工具是面试分析动作（而非文件操作），
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Dict, List
 
@@ -19,12 +20,32 @@ def _now() -> str:
 
 
 def _safe_jsonable(obj: Any) -> Any:
-    """把可能含 Pydantic 模型/枚举的对象转为 JSON 可序列化结构."""
+    """把可能含 Pydantic 模型/枚举的对象转为 JSON 可序列化结构.
+
+    优先使用 Pydantic 的 model_dump(),避免 default=str 产生 Python repr
+    (如 "field='value'")导致前端难以解析。
+    """
+    # 递归处理 Pydantic 模型
+    if hasattr(obj, "model_dump"):
+        return _safe_jsonable(obj.model_dump())
+    # 枚举
+    if hasattr(obj, "value") and not isinstance(obj, type):
+        return _safe_jsonable(obj.value)
+    # 列表/元组
+    if isinstance(obj, (list, tuple)):
+        return [_safe_jsonable(item) for item in obj]
+    # 字典
+    if isinstance(obj, dict):
+        return {k: _safe_jsonable(v) for k, v in obj.items()}
+    # 基本类型直接返回
+    if isinstance(obj, (str, int, float, bool, type(None))):
+        return obj
+    # 其他类型:尝试 JSON 序列化,失败则转 str
     try:
         json.dumps(obj, ensure_ascii=False)
         return obj
     except (TypeError, ValueError):
-        return json.loads(json.dumps(obj, ensure_ascii=False, default=str))
+        return str(obj)
 
 # ── 工具规格 ──
 
@@ -80,6 +101,22 @@ TOOL_SPECS: List[Dict[str, Any]] = [
         },
         "risky": False,
     },
+    {
+        "name": "read_position",
+        "description": "读取职位库中某个职位的完整信息（JD 正文、公司、岗位等），用于回答用户关于当前查看职位的提问",
+        "schema": {
+            "position_id": "str（可选：职位 ID，默认读取 page_context 中正在查看的职位）",
+        },
+        "risky": False,
+    },
+    {
+        "name": "read_resume",
+        "description": "读取简历库中某份简历的完整信息（基本信息、教育、工作、项目、技能），用于回答用户关于当前查看简历的提问",
+        "schema": {
+            "resume_id": "str（可选：简历 ID，默认读取 page_context 中正在查看的简历）",
+        },
+        "risky": False,
+    },
 ]
 
 
@@ -96,6 +133,8 @@ def validate_tool(name: str, args: Dict[str, Any]) -> None:
     optional_keys = {
         "run_analysis": {"company_name", "job_title", "company_business_scope"},
         "read_node_io": {"scope", "node", "analysis_id", "interview_id"},
+        "read_position": {"position_id"},
+        "read_resume": {"resume_id"},
     }
     optional = optional_keys.get(name, set())
     for key, expected_type in schema.items():
@@ -196,18 +235,26 @@ def run_analysis_with_progress(agent: "HireMindAgent", args: Dict[str, Any], on_
     final_state = None
     node_io_records: List[Dict[str, Any]] = []
     # 流式执行:逐节点回调进度 + 记录 node_io
-    for node_name, label, state, patch in graph.stream_run(input_data):
-        if on_progress:
-            on_progress(node_name, label)
-        if node_name != "done":
-            node_io_records.append({
-                "node": node_name,
-                "label": label,
-                "output": _safe_jsonable(patch),
-                "ts": _now(),
-            })
-        if node_name == "done":
-            final_state = state
+    try:
+        for node_name, label, state, patch in graph.stream_run(input_data):
+            if node_name != "done":
+                node_io_records.append({
+                    "node": node_name,
+                    "label": label,
+                    "output": _safe_jsonable(patch),
+                    "ts": _now(),
+                })
+            # 实时同步 node_io 到 agent.analysis,供 _on_progress 落盘
+            agent.analysis["node_io"] = node_io_records
+            if on_progress:
+                on_progress(node_name, label)
+            if node_name == "done":
+                final_state = state
+    except Exception as exc:
+        # stream_run 出错时保存已完成的 node_io,再向上抛出
+        agent.analysis["node_io"] = node_io_records
+        agent.analysis_store.save(agent.analysis)
+        raise
 
     # 保存节点 IO 记录到分析 json,供 read_node_io 工具读取
     agent.analysis["node_io"] = node_io_records
@@ -374,27 +421,48 @@ def tool_save_to_workspace(agent: "HireMindAgent", args: Dict[str, Any]) -> str:
 
 
 def tool_read_node_io(agent: "HireMindAgent", args: Dict[str, Any]) -> str:
-    """读取工作流节点的输入输出信息(分析图 + 模拟面试图)."""
+    """读取工作流节点的输入输出信息(分析图 + 模拟面试图).
+
+    始终从磁盘重新加载分析记录,确保读取到最新的 node_io(包括正在运行的分析)。
+    当目标分析/面试仍在进行中时,返回"进行中"提示,让模型据实告知用户
+    当前无法提供具体结果,但不影响回答与当前分析/面试无关的其他问题。
+    """
     scope = args.get("scope", "all")
     node_filter = args.get("node", "")
-    analysis_id = args.get("analysis_id", "")
+    analysis_id = args.get("analysis_id", "") or agent.analysis.get("id", "")
     interview_id = args.get("interview_id", "")
 
     result: Dict[str, Any] = {}
 
-    # ── 分析图节点 IO ──
+    # ── 分析图节点 IO ──(始终从磁盘加载,获取最新数据)
     if scope in ("all", "analysis"):
         try:
-            if analysis_id and analysis_id != agent.analysis.get("id"):
+            if analysis_id:
                 analysis = agent.analysis_store.load(analysis_id)
             else:
                 analysis = agent.analysis
-            analysis_io = (analysis or {}).get("node_io", [])
-            if node_filter:
-                analysis_io = [
-                    r for r in analysis_io if r.get("node") == node_filter
+            analysis = analysis or {}
+            status = analysis.get("status", "completed")
+            # 进行中(pending)时返回提示,避免模型基于不完整数据空转拼凑答案
+            if status == "pending":
+                completed_labels = [
+                    r.get("label", r.get("node", ""))
+                    for r in (analysis.get("node_io") or [])
                 ]
-            result["analysis_node_io"] = analysis_io
+                result["analysis_node_io"] = (
+                    f"当前分析（{analysis_id}）正在进行中，尚未完成"
+                    f"（已完成节点：{completed_labels or '暂无'}）。"
+                    f"关于本次分析的匹配度/业务场景/风险/出题等具体结果暂时无法提供，"
+                    f"请告知用户等待分析完成后再询问本次分析的结果。"
+                    f"你可以正常回答与本次分析无关的其他问题。"
+                )
+            else:
+                analysis_io = analysis.get("node_io", [])
+                if node_filter:
+                    analysis_io = [
+                        r for r in analysis_io if r.get("node") == node_filter
+                    ]
+                result["analysis_node_io"] = analysis_io
         except Exception as exc:
             result["analysis_node_io"] = f"读取失败: {exc}"
 
@@ -404,15 +472,26 @@ def tool_read_node_io(agent: "HireMindAgent", args: Dict[str, Any]) -> str:
             try:
                 state = agent.interview_store.load(interview_id)
                 if state:
-                    iv_io = state.get("node_io") or []
-                    if node_filter:
-                        filtered = []
-                        for record in iv_io:
-                            for action, data in record.items():
-                                if action == node_filter:
-                                    filtered.append({action: data})
-                        iv_io = filtered
-                    result["interview_node_io"] = iv_io
+                    iv_status = state.get("status", "")
+                    # 面试进行中(started/answering,尚未产生评价)时返回提示;
+                    # evaluated(阶段已评估)/finished/abandoned 正常返回数据
+                    if iv_status in ("started", "answering"):
+                        result["interview_node_io"] = (
+                            f"当前模拟面试（{interview_id}）正在进行中，状态：{iv_status}，"
+                            f"尚无评价/得分结果。关于本次面试的具体表现评价暂时无法提供，"
+                            f"请告知用户完成当前阶段答题后再询问评价。"
+                            f"你可以正常回答与本次面试无关的其他问题。"
+                        )
+                    else:
+                        iv_io = state.get("node_io") or []
+                        if node_filter:
+                            filtered = []
+                            for record in iv_io:
+                                for action, data in record.items():
+                                    if action == node_filter:
+                                        filtered.append({action: data})
+                            iv_io = filtered
+                        result["interview_node_io"] = iv_io
                 else:
                     result["interview_node_io"] = "模拟面试不存在"
             except Exception as exc:
@@ -421,6 +500,100 @@ def tool_read_node_io(agent: "HireMindAgent", args: Dict[str, Any]) -> str:
             result["interview_node_io"] = "未指定 interview_id,跳过"
 
     return json.dumps(result, ensure_ascii=False, indent=2, default=str)
+
+
+def _extract_id_from_context(agent: "HireMindAgent", pattern: str) -> str:
+    """从 page_context 字符串中正则提取 ID(如 position_id / resume_id)."""
+    context = getattr(agent, "_current_page_context", "") or ""
+    match = re.search(pattern, context)
+    return match.group(1) if match else ""
+
+
+def tool_read_position(agent: "HireMindAgent", args: Dict[str, Any]) -> str:
+    """读取职位库中某个职位的完整信息(JD 正文、公司、岗位等).
+
+    优先用 args 里的 position_id,否则从 page_context 中提取当前查看的职位 ID。
+    """
+    position_id = args.get("position_id", "")
+    if not position_id:
+        # page_context 格式: "正在查看职位（ID: pos-xxx）"
+        position_id = _extract_id_from_context(agent, r"正在查看职位（ID:\s*([^）]+)）")
+
+    if not position_id:
+        return json.dumps(
+            {"error": "未指定 position_id,且无法从当前页面上下文中提取职位 ID。"
+             "请告知用户先在职位库中选择一个职位,或在参数中提供 position_id。"},
+            ensure_ascii=False,
+        )
+
+    try:
+        position = agent.position_store.get(position_id)
+        if position is None:
+            return json.dumps(
+                {"error": f"职位 {position_id} 不存在。"},
+                ensure_ascii=False,
+            )
+        # 返回关键字段(JD 正文可能很长,完整返回供模型分析专业技能)
+        return json.dumps(
+            {
+                "id": position.id,
+                "name": position.name,
+                "company_name": position.company_name,
+                "company_business_scope": position.company_business_scope,
+                "job_title": position.job_title,
+                "job_requirements": position.job_requirements,
+                "notes": position.notes,
+                "created_at": position.created_at,
+                "updated_at": position.updated_at,
+            },
+            ensure_ascii=False,
+            indent=2,
+            default=str,
+        )
+    except Exception as exc:
+        return json.dumps({"error": f"读取职位失败: {exc}"}, ensure_ascii=False)
+
+
+def tool_read_resume(agent: "HireMindAgent", args: Dict[str, Any]) -> str:
+    """读取简历库中某份简历的完整信息(基本信息、教育、工作、项目、技能).
+
+    优先用 args 里的 resume_id,否则从 page_context 中提取当前查看的简历 ID。
+    """
+    resume_id = args.get("resume_id", "")
+    if not resume_id:
+        # page_context 格式: "正在查看简历（ID: resume-xxx）"
+        resume_id = _extract_id_from_context(agent, r"正在查看简历（ID:\s*([^）]+)）")
+
+    if not resume_id:
+        return json.dumps(
+            {"error": "未指定 resume_id,且无法从当前页面上下文中提取简历 ID。"
+             "请告知用户先在简历管理中选择一份简历,或在参数中提供 resume_id。"},
+            ensure_ascii=False,
+        )
+
+    try:
+        resume = agent.resume_store.get(resume_id)
+        if resume is None:
+            return json.dumps(
+                {"error": f"简历 {resume_id} 不存在。"},
+                ensure_ascii=False,
+            )
+        # 返回完整简历数据供模型分析
+        return json.dumps(
+            {
+                "id": resume.id,
+                "name": resume.name,
+                "data": resume.data,
+                "raw_text": getattr(resume, "raw_text", "") or "",
+                "created_at": resume.created_at,
+                "updated_at": resume.updated_at,
+            },
+            ensure_ascii=False,
+            indent=2,
+            default=str,
+        )
+    except Exception as exc:
+        return json.dumps({"error": f"读取简历失败: {exc}"}, ensure_ascii=False)
 
 
 # ── 工具运行器映射 ──
@@ -432,6 +605,8 @@ _TOOL_RUNNERS: Dict[str, Callable] = {
     "export_report": tool_export_report,
     "save_to_workspace": tool_save_to_workspace,
     "read_node_io": tool_read_node_io,
+    "read_position": tool_read_position,
+    "read_resume": tool_read_resume,
 }
 
 

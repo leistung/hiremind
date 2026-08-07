@@ -198,6 +198,7 @@ class AnalysisDetailResponse(BaseModel):
     error: Optional[str] = None
     model: str = ""
     metadata: Dict[str, Any] = {}
+    node_io: List[Dict[str, Any]] = []
 
 
 class ExportRequest(BaseModel):
