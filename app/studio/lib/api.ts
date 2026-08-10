@@ -412,4 +412,79 @@ export const api = {
     const origin = BASE.replace(/\/api\/?$/, "");
     return `${origin}${path}`;
   },
+
+  // ── Ask 对话窗口 ──
+  // SSE 流式与 agent 对话
+  // onEvent: 收到 SSE 事件(thinking/answer/error/done/heartbeat)
+  // 返回 abort 函数
+  ask: (
+    message: string,
+    onEvent: (payload: { type: string; content?: string }) => void,
+    opts?: {
+      analysis_id?: string;
+      interview_id?: string;
+      page?: string;
+      context?: string;
+    },
+  ): (() => void) => {
+    const controller = new AbortController();
+    const url = `${BASE}/ask`;
+
+    (async () => {
+      try {
+        const res = await fetch(url, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "text/event-stream",
+          },
+          body: JSON.stringify({
+            message,
+            analysis_id: opts?.analysis_id,
+            interview_id: opts?.interview_id,
+            page: opts?.page,
+            context: opts?.context,
+          }),
+          signal: controller.signal,
+        });
+        if (!res.ok || !res.body) {
+          onEvent({ type: "error", content: `HTTP ${res.status}` });
+          return;
+        }
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder("utf-8");
+        let buffer = "";
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          let idx: number;
+          while ((idx = buffer.indexOf("\n\n")) >= 0) {
+            const raw = buffer.slice(0, idx);
+            buffer = buffer.slice(idx + 2);
+            const lines = raw.split("\n");
+            const dataLine = lines.find((l) => l.startsWith("data:"));
+            if (!dataLine) continue;
+            const jsonStr = dataLine.slice(5).trim();
+            if (!jsonStr) continue;
+            try {
+              const payload = JSON.parse(jsonStr) as {
+                type: string;
+                content?: string;
+              };
+              onEvent(payload);
+            } catch {
+              // 忽略解析错误
+            }
+          }
+        }
+      } catch (e) {
+        if ((e as Error).name !== "AbortError") {
+          onEvent({ type: "error", content: (e as Error).message || "连接失败" });
+        }
+      }
+    })();
+
+    return () => controller.abort();
+  },
 };

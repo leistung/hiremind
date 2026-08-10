@@ -1,23 +1,18 @@
-"""简历服务：CRUD、结构化解析、模板化导出 Word/PDF."""
+"""简历业务服务:模板定义、结构化解析、Word/PDF 导出.
+
+存储类 ResumeStore 已迁移至 store/resume_store.py。
+"""
 
 from __future__ import annotations
 
-import json
 import re
-import uuid
-from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 
 from ..models.schemas import (
-    Position,
     Resume,
     ResumeData,
-    ResumeEducation,
-    ResumeExperience,
-    ResumeProject,
-    ResumeSkill,
 )
 from ..prompts import RESUME_STRUCTURE_PROMPT
 from .llm_service import get_llm
@@ -44,144 +39,8 @@ TEMPLATES = {
 }
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
 def _safe_name(name: str) -> str:
     return re.sub(r"[^\w\u4e00-\u9fa5\-]", "_", name or "未命名")[:60] or "未命名"
-
-
-# ── CRUD ──
-
-class ResumeStore:
-    """简历本地存储(JSON 文件)."""
-
-    def __init__(self, root: Path):
-        self.root = Path(root)
-        self.root.mkdir(parents=True, exist_ok=True)
-
-    def _path(self, resume_id: str) -> Path:
-        return self.root / f"{resume_id}.json"
-
-    def list_all(self) -> List[Resume]:
-        items: List[Resume] = []
-        for p in sorted(self.root.glob("*.json"), key=lambda x: x.stat().st_mtime, reverse=True):
-            try:
-                data = json.loads(p.read_text(encoding="utf-8"))
-                items.append(Resume.model_validate(data))
-            except Exception:
-                continue
-        return items
-
-    def get(self, resume_id: str) -> Optional[Resume]:
-        path = self._path(resume_id)
-        if not path.exists():
-            return None
-        try:
-            return Resume.model_validate(json.loads(path.read_text(encoding="utf-8")))
-        except Exception:
-            return None
-
-    def save(self, resume: Resume) -> Resume:
-        ts = _now()
-        if not resume.created_at:
-            resume.created_at = ts
-        resume.updated_at = ts
-        self._path(resume.id).write_text(
-            resume.model_dump_json(indent=2), encoding="utf-8"
-        )
-        return resume
-
-    def delete(self, resume_id: str) -> bool:
-        path = self._path(resume_id)
-        if path.exists():
-            path.unlink()
-            return True
-        return False
-
-    def create(self, name: str = "", data: Optional[ResumeData] = None) -> Resume:
-        resume = Resume(
-            id=f"resume-{uuid.uuid4().hex[:12]}",
-            name=name or "未命名简历",
-            data=data or ResumeData(),
-        )
-        return self.save(resume)
-
-
-# ── 职位库 CRUD ──
-
-class PositionStore:
-    """职位/JD 本地存储(JSON 文件)."""
-
-    def __init__(self, root: Path):
-        self.root = Path(root)
-        self.root.mkdir(parents=True, exist_ok=True)
-
-    def _path(self, position_id: str) -> Path:
-        return self.root / f"{position_id}.json"
-
-    def list_all(self) -> List[Position]:
-        items: List[Position] = []
-        for p in sorted(self.root.glob("*.json"), key=lambda x: x.stat().st_mtime, reverse=True):
-            try:
-                data = json.loads(p.read_text(encoding="utf-8"))
-                items.append(Position.model_validate(data))
-            except Exception:
-                continue
-        return items
-
-    def get(self, position_id: str) -> Optional[Position]:
-        path = self._path(position_id)
-        if not path.exists():
-            return None
-        try:
-            return Position.model_validate(json.loads(path.read_text(encoding="utf-8")))
-        except Exception:
-            return None
-
-    def save(self, position: Position) -> Position:
-        ts = _now()
-        if not position.created_at:
-            position.created_at = ts
-        position.updated_at = ts
-        self._path(position.id).write_text(
-            position.model_dump_json(indent=2), encoding="utf-8"
-        )
-        return position
-
-    def delete(self, position_id: str) -> bool:
-        path = self._path(position_id)
-        if path.exists():
-            path.unlink()
-            return True
-        return False
-
-    def create(
-        self,
-        name: str = "",
-        company_name: str = "",
-        company_business_scope: str = "",
-        job_title: str = "",
-        job_requirements: str = "",
-        notes: str = "",
-    ) -> Position:
-        # 自动生成默认名称:公司+职位,若都为空则用"未命名职位"
-        default_name = (
-            name
-            or " · ".join(filter(None, [company_name.strip(), job_title.strip()]))
-            or "未命名职位"
-        )
-        position = Position(
-            id=f"pos-{uuid.uuid4().hex[:12]}",
-            name=default_name,
-            company_name=company_name,
-            company_business_scope=company_business_scope,
-            job_title=job_title,
-            job_requirements=job_requirements,
-            notes=notes,
-        )
-        return self.save(position)
 
 
 # ── 结构化解析 ──

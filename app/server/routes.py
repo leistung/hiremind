@@ -18,21 +18,16 @@ from hiremind.models.schemas import (
     ResumeData,
     StageConfig,
 )
+from hiremind.store import InterviewStore, PositionStore, ResumeStore
+from hiremind.nodes.interview_nodes import DEFAULT_STAGE_CONFIGS
 from hiremind.services import (
-    InterviewStore,
-    MockInterview,
-    PositionStore,
-    ResumeStore,
     TEMPLATES,
-    DEFAULT_STAGE_CONFIGS,
     export_resume_pdf,
     export_resume_word,
     generate_pdf,
     generate_word,
-    new_interview,
     parse_document,
     parse_resume_text_to_structured,
-    recommend_stage_configs,
 )
 from hiremind.services.llm_service import get_llm
 
@@ -51,6 +46,7 @@ from .schemas import (
     AnalysisSummary,
     AnalysisListResponse,
     AnalysisDetailResponse,
+    AskRequest,
     ExportRequest,
     ExportResponse,
     HealthResponse,
@@ -188,8 +184,8 @@ def run_analysis(req: AnalysisRequest):
     前端通过 GET /analysis/history/{analysis_id} 轮询结果。
     company_name 与 job_title 可选,留空时使用占位符。
     """
-    from hiremind import AnalysisStore, RunStore, HireMindAgent
-    from hiremind.analysis_store import new_analysis
+    from hiremind import AnalysisStore, AskStore, HireMindAgent
+    from hiremind.store.analysis_store import new_analysis_state
 
     try:
         ws = get_workspace()
@@ -201,7 +197,7 @@ def run_analysis(req: AnalysisRequest):
         job_title = (req.job_title or "").strip() or "未指定岗位"
         # 记录启动时使用的模型,供前端显示(分析启动后改模型不影响本次)
         # 把简历/职位来源存入 metadata,供历史记录页溯源跳转
-        analysis = new_analysis(
+        analysis = new_analysis_state(
             title=f"{company_name}-{job_title}",
             model=settings.model_name,
             metadata={
@@ -239,7 +235,7 @@ def run_analysis(req: AnalysisRequest):
                     model_client=llm,
                     workspace=ws,
                     analysis_store=analysis_store,
-                    run_store=RunStore(ws.runs_dir),
+                    run_store=AskStore(ws.runs_dir),
                     analysis_id=analysis_id,
                 )
 
@@ -252,13 +248,10 @@ def run_analysis(req: AnalysisRequest):
                         "completed": list(completed_nodes),
                         "current": label if node_name != "done" else None,
                     }
-                    # 同步更新 agent 的内存副本,避免最终保存时覆盖 progress 字段
+                    # 同步更新内存副本(progress + node_io 已由 tools 实时设置)
                     agent.analysis["progress"] = progress
-                    # 写入磁盘供 SSE 端点轮询读取
-                    a = analysis_store.load(analysis_id)
-                    if a is not None:
-                        a["progress"] = progress
-                        analysis_store.save(a)
+                    # 直接保存内存对象,不从磁盘重新加载避免竞态
+                    agent.analysis_store.save(agent.analysis)
 
                 run_analysis_with_progress(agent, params, on_progress=_on_progress)
             except Exception as exc:
@@ -296,26 +289,27 @@ def run_analysis(req: AnalysisRequest):
 def get_interview_report(interview_id: str):
     """读取指定模拟面试的最终报告(含完整 turns)."""
     store = get_interview_store()
-    agent = get_agent()
-    iv = store.load(interview_id, model_client=agent.model_client)
-    if not iv:
+    state = store.load(interview_id)
+    if not state:
         raise HTTPException(status_code=404, detail="Interview not found")
+    result = state.get("result") or {}
+    report = state.get("report")
     # 若未生成报告但已结束,现场补生成
-    if not iv.report and iv.status == "finished":
+    if not report and state.get("status") == "finished":
         try:
-            iv.build_final_report()
-            store.save(iv)
+            agent = get_agent()
+            state, report = agent.finish_interview(interview_id)
         except Exception:
             pass
     return {
         "success": True,
         "interview_id": interview_id,
-        "analysis_id": iv.analysis_id,
-        "status": iv.status,
-        "company_name": iv.result.company_name,
-        "job_title": iv.result.job_title,
-        "turns": [t.model_dump() for t in iv.turns],
-        "report": iv.report.model_dump() if iv.report else None,
+        "analysis_id": state.get("analysis_id", ""),
+        "status": state.get("status", ""),
+        "company_name": result.get("company_name", ""),
+        "job_title": result.get("job_title", ""),
+        "turns": state.get("turns") or [],
+        "report": report,
     }
 
 
@@ -378,6 +372,7 @@ async def get_analysis(analysis_id: str):
         error=analysis.get("error") if status == "error" else None,
         model=analysis.get("model", "") or "",
         metadata=analysis.get("metadata", {}) or {},
+        node_io=analysis.get("node_io") or [],
     )
 
 
@@ -447,6 +442,7 @@ async def stream_analysis_progress(analysis_id: str):
                 payload = {
                     "status": status,
                     "progress": progress,
+                    "node_io": analysis.get("node_io") or [],
                 }
                 # 完成时附带最终结果
                 if status == "completed":
@@ -464,6 +460,7 @@ async def stream_analysis_progress(analysis_id: str):
                 payload = {"status": status}
                 if status == "completed":
                     payload["result"] = analysis.get("interview_result")
+                    payload["node_io"] = analysis.get("node_io") or []
                 elif status in ("error", "cancelled"):
                     payload["error"] = analysis.get("error") or ("已取消" if status == "cancelled" else "分析失败")
                 yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
@@ -820,70 +817,69 @@ async def delete_position(position_id: str):
 
 # ── 模拟面试 ──
 
-def _serialize_interview_state(iv: MockInterview) -> dict:
-    """把 MockInterview 序列化为前端可用的状态."""
-    state = {
-        "interview_id": iv.id,
-        "status": iv.status,
-        "current_question": iv.current_question.question if iv.current_question else None,
-        "current_focus": iv.current_question.focus if iv.current_question else None,
-        "current_rationale": iv.current_question.rationale if iv.current_question else None,
-        "current_reference_answer": iv.current_question.reference_answer
-        if iv.current_question
-        else None,
-        "turn_index": len(iv.turns),
-        "max_turns": iv.max_turns,
-        "turns": [t.model_dump() for t in iv.turns],
-        "finished": iv.status == "finished",
-        "company_name": iv.result.company_name,
-        "job_title": iv.result.job_title,
-        # 多阶段字段
-        "is_multi_stage": iv.is_multi_stage,
-        "current_stage_index": iv.current_stage_index,
-        "current_stage_type": (
-            iv.stages[iv.current_stage_index].stage_type.value
-            if iv.is_multi_stage
-            and iv.current_stage_index < len(iv.stages)
-            and iv.stages[iv.current_stage_index].status != "completed"
-            else None
-        ),
-        "current_stage_name": (
-            iv.stages[iv.current_stage_index].stage_name
-            if iv.is_multi_stage
-            and iv.current_stage_index < len(iv.stages)
-            and iv.stages[iv.current_stage_index].status != "completed"
-            else None
-        ),
+def _serialize_interview_state(state: dict) -> dict:
+    """把 InterviewFlowState 序列化为前端可用的状态."""
+    result = state.get("result") or {}
+    current_q = state.get("current_question")
+    stages = state.get("stages") or []
+    stage_idx = state.get("current_stage_index", 0)
+    is_multi = state.get("is_multi_stage", False)
+
+    # 判断当前阶段类型
+    current_stage_type = None
+    current_stage_name = None
+    if is_multi and stage_idx < len(stages):
+        stage = stages[stage_idx]
+        if stage.get("status") != "completed":
+            current_stage_type = stage.get("stage_type")
+            current_stage_name = stage.get("stage_name")
+
+    # 笔试题目列表(不含参考答案)
+    written_questions = []
+    if (
+        is_multi
+        and stage_idx < len(stages)
+        and stages[stage_idx].get("stage_type") == InterviewStageType.WRITTEN.value
+        and stages[stage_idx].get("status") == "in_progress"
+    ):
+        for i, q in enumerate(stages[stage_idx].get("written_questions") or []):
+            written_questions.append({
+                "index": i,
+                "title": q.get("title", ""),
+                "question": q.get("question", ""),
+                "focus": q.get("focus", ""),
+                "direction": q.get("direction", ""),
+            })
+
+    return {
+        "interview_id": state.get("interview_id", ""),
+        "status": state.get("status", ""),
+        "current_question": current_q.get("question") if current_q else None,
+        "current_focus": current_q.get("focus") if current_q else None,
+        "current_rationale": current_q.get("rationale") if current_q else None,
+        "current_reference_answer": current_q.get("reference_answer") if current_q else None,
+        "turn_index": len(state.get("turns") or []),
+        "max_turns": state.get("max_turns", 8),
+        "turns": state.get("turns") or [],
+        "finished": state.get("status") == "finished",
+        "company_name": result.get("company_name", ""),
+        "job_title": result.get("job_title", ""),
+        "is_multi_stage": is_multi,
+        "current_stage_index": stage_idx,
+        "current_stage_type": current_stage_type,
+        "current_stage_name": current_stage_name,
         "stages_progress": [
             {
-                "stage_type": s.stage_type.value,
-                "stage_name": s.stage_name,
-                "status": s.status,
-                "stage_score": s.stage_score,
-                "turns_count": len(s.turns),
+                "stage_type": s.get("stage_type", ""),
+                "stage_name": s.get("stage_name", ""),
+                "status": s.get("status", ""),
+                "stage_score": s.get("stage_score", 0),
+                "turns_count": len(s.get("turns") or []),
             }
-            for s in iv.stages
-        ] if iv.is_multi_stage else [],
-        # 笔试阶段:题目列表(不含参考答案)
-        "written_questions": (
-            [
-                {
-                    "index": i,
-                    "title": q.title,
-                    "question": q.question,
-                    "focus": q.focus,
-                    "direction": q.direction,
-                }
-                for i, q in enumerate(iv.stages[iv.current_stage_index].written_questions)
-            ]
-            if iv.is_multi_stage
-            and iv.current_stage_index < len(iv.stages)
-            and iv.stages[iv.current_stage_index].stage_type == InterviewStageType.WRITTEN
-            and iv.stages[iv.current_stage_index].status == "in_progress"
-            else []
-        ),
+            for s in stages
+        ] if is_multi else [],
+        "written_questions": written_questions,
     }
-    return state
 
 
 @router.post("/interview/stages/recommend", tags=["Interview"])
@@ -896,13 +892,13 @@ def recommend_stages(req: StageRecommendRequest):
     try:
         agent = get_agent()
         if req.analysis_id and req.analysis_id != agent.analysis.get("id"):
-            from hiremind import HireMindAgent, AnalysisStore, RunStore
+            from hiremind import HireMindAgent, AnalysisStore, AskStore
             ws = get_workspace()
             agent = HireMindAgent.from_analysis(
                 model_client=agent.model_client,
                 workspace=ws,
                 analysis_store=AnalysisStore(ws.analyses_dir),
-                run_store=RunStore(ws.runs_dir),
+                run_store=AskStore(ws.runs_dir),
                 analysis_id=req.analysis_id,
             )
         result_data = agent.analysis.get("interview_result")
@@ -911,8 +907,8 @@ def recommend_stages(req: StageRecommendRequest):
         result = InterviewResult.model_validate(result_data)
         company_business_scope = agent.analysis.get("company_business_scope", "") or ""
         job_requirements = agent.analysis.get("job_requirements", "") or ""
-        configs = recommend_stage_configs(
-            result=result,
+        configs = agent.recommend_interview_stages(
+            analysis_id=agent.analysis.get("id", ""),
             expected_rounds=req.expected_rounds,
             company_business_scope=company_business_scope,
             jd_summary=job_requirements,
@@ -929,53 +925,39 @@ def recommend_stages(req: StageRecommendRequest):
 
 @router.post("/interview/start", tags=["Interview"])
 def start_interview(req: InterviewStartRequest):
-    """启动一场模拟面试,基于指定分析的分析结果.
-
-    支持多阶段:若 req.stages 非空则用多阶段模式,否则用旧版单场模式。
-    """
+    """启动一场模拟面试,基于指定分析的分析结果."""
     try:
         agent = get_agent()
-        # 恢复指定分析
         if req.analysis_id and req.analysis_id != agent.analysis.get("id"):
-            from hiremind import HireMindAgent, AnalysisStore, RunStore
+            from hiremind import HireMindAgent, AnalysisStore, AskStore
             ws = get_workspace()
             agent = HireMindAgent.from_analysis(
                 model_client=agent.model_client,
                 workspace=ws,
                 analysis_store=AnalysisStore(ws.analyses_dir),
-                run_store=RunStore(ws.runs_dir),
+                run_store=AskStore(ws.runs_dir),
                 analysis_id=req.analysis_id,
             )
-        result_data = agent.analysis.get("interview_result")
-        if not result_data:
-            return {"success": False, "error": "该分析尚未生成报告,请先在分析页生成报告"}
-        result = InterviewResult.model_validate(result_data)
 
         # 解析阶段配置:空则用默认4阶段
-        stage_configs: List[StageConfig] = []
+        stage_configs = []
         if req.stages:
             for s in req.stages:
                 if not s.get("enabled", True):
                     continue
-                stage_configs.append(StageConfig.model_validate(s))
+                stage_configs.append(s)
         if not stage_configs and req.stages is not None and len(req.stages) > 0:
-            # 全部被禁用,回退到默认
-            stage_configs = list(DEFAULT_STAGE_CONFIGS)
+            stage_configs = [c.model_dump() for c in DEFAULT_STAGE_CONFIGS]
 
-        iv = new_interview(
-            analysis_id=agent.analysis["id"],
-            result=result,
-            resume_text="",
+        state, output = agent.start_interview(
+            analysis_id=agent.analysis.get("id", ""),
             max_turns=req.max_turns,
-            model_client=agent.model_client,
-            stage_configs=stage_configs or None,
+            stages=stage_configs or None,
         )
-        first_q = iv.start()
-        store = get_interview_store()
-        store.save(iv)
-        state = _serialize_interview_state(iv)
-        state["first_question"] = first_q
-        return {"success": True, "state": state}
+        first_q = output.get("question_text") or output.get("signal") or ""
+        state_view = _serialize_interview_state(state)
+        state_view["first_question"] = first_q
+        return {"success": True, "state": state_view}
     except Exception as exc:
         return {"success": False, "error": str(exc)}
 
@@ -983,19 +965,18 @@ def start_interview(req: InterviewStartRequest):
 @router.post("/interview/{interview_id}/answer", tags=["Interview"])
 def submit_answer(interview_id: str, req: InterviewAnswerRequest):
     """提交候选人回答,返回即时评价."""
-    store = get_interview_store()
-    agent = get_agent()
-    iv = store.load(interview_id, model_client=agent.model_client)
-    if not iv:
-        raise HTTPException(status_code=404, detail="Interview not found")
     try:
-        turn = iv.submit_answer(req.answer)
-        store.save(iv)
+        agent = get_agent()
+        state, output = agent.submit_interview_answer(interview_id, req.answer)
+        if state.get("error"):
+            return {"success": False, "error": state["error"]}
         return {
             "success": True,
-            "turn": turn.model_dump(),
-            "state": _serialize_interview_state(iv),
+            "turn": output,
+            "state": _serialize_interview_state(state),
         }
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Interview not found")
     except Exception as exc:
         return {"success": False, "error": str(exc)}
 
@@ -1003,45 +984,44 @@ def submit_answer(interview_id: str, req: InterviewAnswerRequest):
 @router.post("/interview/{interview_id}/next", tags=["Interview"])
 def next_question(interview_id: str):
     """生成下一道题(或结束面试/阶段完成)."""
-    store = get_interview_store()
-    agent = get_agent()
-    iv = store.load(interview_id, model_client=agent.model_client)
-    if not iv:
-        raise HTTPException(status_code=404, detail="Interview not found")
     try:
-        result = iv.next_question()
-        store.save(iv)
-        if result == "__INTERVIEW_FINISHED__":
-            report = iv.build_final_report()
-            store.save(iv)
+        agent = get_agent()
+        state, output = agent.next_interview_question(interview_id)
+        if state.get("error"):
+            return {"success": False, "error": state["error"]}
+        signal = output.get("signal")
+        if signal == "__INTERVIEW_FINISHED__":
             return {
                 "success": True,
                 "finished": True,
-                "report": report.model_dump(),
-                "state": _serialize_interview_state(iv),
+                "report": state.get("report"),
+                "state": _serialize_interview_state(state),
             }
-        if result == "__STAGE_COMPLETED__":
-            # 当前阶段已完成,等待前端调用 /advance 进入下一阶段
-            stage = iv.current_stage
+        if signal == "__STAGE_COMPLETED__":
+            stages = state.get("stages") or []
+            idx = state.get("current_stage_index", 0)
+            stage = stages[idx] if idx < len(stages) else {}
             return {
                 "success": True,
                 "finished": False,
                 "stage_completed": True,
                 "stage_summary": {
-                    "stage_type": stage.stage_type.value if stage else None,
-                    "stage_name": stage.stage_name if stage else "",
-                    "stage_score": stage.stage_score if stage else 0,
-                    "stage_summary": stage.stage_summary if stage else "",
-                    "promotion_hint": stage.promotion_hint if stage else "",
+                    "stage_type": stage.get("stage_type"),
+                    "stage_name": stage.get("stage_name", ""),
+                    "stage_score": stage.get("stage_score", 0),
+                    "stage_summary": stage.get("stage_summary", ""),
+                    "promotion_hint": stage.get("promotion_hint", ""),
                 } if stage else None,
-                "state": _serialize_interview_state(iv),
+                "state": _serialize_interview_state(state),
             }
         return {
             "success": True,
             "finished": False,
-            "next_question": result,
-            "state": _serialize_interview_state(iv),
+            "next_question": output.get("question_text", ""),
+            "state": _serialize_interview_state(state),
         }
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Interview not found")
     except Exception as exc:
         return {"success": False, "error": str(exc)}
 
@@ -1049,24 +1029,22 @@ def next_question(interview_id: str):
 @router.post("/interview/{interview_id}/written/submit", tags=["Interview"])
 def submit_written_answers(interview_id: str, req: WrittenAnswerRequest):
     """笔试批量提交答案,返回逐题评价 + 阶段总结."""
-    store = get_interview_store()
-    agent = get_agent()
-    iv = store.load(interview_id, model_client=agent.model_client)
-    if not iv:
-        raise HTTPException(status_code=404, detail="Interview not found")
     try:
-        # answers 键是字符串序号,转成 int
+        agent = get_agent()
         answers = {int(k): v for k, v in req.answers.items()}
-        result = iv.submit_written_answers(answers)
-        store.save(iv)
+        state, output = agent.submit_interview_written(interview_id, answers)
+        if state.get("error"):
+            return {"success": False, "error": state["error"]}
         return {
             "success": True,
-            "turns": result["turns"],
-            "stage_score": result["stage_score"],
-            "stage_summary": result["stage_summary"],
-            "promotion_hint": result["promotion_hint"],
-            "state": _serialize_interview_state(iv),
+            "turns": output.get("turns", []),
+            "stage_score": output.get("stage_score", 0),
+            "stage_summary": output.get("stage_summary", ""),
+            "promotion_hint": output.get("promotion_hint", ""),
+            "state": _serialize_interview_state(state),
         }
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Interview not found")
     except Exception as exc:
         return {"success": False, "error": str(exc)}
 
@@ -1074,38 +1052,34 @@ def submit_written_answers(interview_id: str, req: WrittenAnswerRequest):
 @router.post("/interview/{interview_id}/advance", tags=["Interview"])
 def advance_stage(interview_id: str):
     """进入下一个面试阶段(多阶段模式)."""
-    store = get_interview_store()
-    agent = get_agent()
-    iv = store.load(interview_id, model_client=agent.model_client)
-    if not iv:
-        raise HTTPException(status_code=404, detail="Interview not found")
-    if not iv.is_multi_stage:
-        return {"success": False, "error": "当前面试不是多阶段模式"}
     try:
-        result = iv.advance_to_next_stage()
-        store.save(iv)
-        if result == "__INTERVIEW_FINISHED__":
-            report = iv.build_final_report()
-            store.save(iv)
+        agent = get_agent()
+        state, output = agent.advance_interview_stage(interview_id)
+        if state.get("error"):
+            return {"success": False, "error": state["error"]}
+        signal = output.get("signal")
+        if signal == "__INTERVIEW_FINISHED__":
             return {
                 "success": True,
                 "finished": True,
-                "report": report.model_dump(),
-                "state": _serialize_interview_state(iv),
+                "report": state.get("report"),
+                "state": _serialize_interview_state(state),
             }
-        if result == "__WRITTEN_READY__":
+        if signal == "__WRITTEN_READY__":
             return {
                 "success": True,
                 "finished": False,
                 "written_ready": True,
-                "state": _serialize_interview_state(iv),
+                "state": _serialize_interview_state(state),
             }
         return {
             "success": True,
             "finished": False,
-            "next_question": result,
-            "state": _serialize_interview_state(iv),
+            "next_question": output.get("question_text", ""),
+            "state": _serialize_interview_state(state),
         }
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Interview not found")
     except Exception as exc:
         return {"success": False, "error": str(exc)}
 
@@ -1113,51 +1087,43 @@ def advance_stage(interview_id: str):
 @router.post("/interview/{interview_id}/finish", tags=["Interview"])
 def finish_interview(interview_id: str):
     """主动结束面试,生成最终报告."""
-    store = get_interview_store()
-    agent = get_agent()
-    iv = store.load(interview_id, model_client=agent.model_client)
-    if not iv:
-        raise HTTPException(status_code=404, detail="Interview not found")
     try:
-        report = iv.build_final_report()
-        store.save(iv)
+        agent = get_agent()
+        state, report = agent.finish_interview(interview_id)
+        if state.get("error"):
+            return {"success": False, "error": state["error"]}
         return {
             "success": True,
-            "report": report.model_dump(),
-            "state": _serialize_interview_state(iv),
+            "report": report,
+            "state": _serialize_interview_state(state),
         }
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Interview not found")
     except Exception as exc:
         return {"success": False, "error": str(exc)}
 
 
 @router.post("/interview/{interview_id}/abandon", tags=["Interview"])
 def abandon_interview(interview_id: str):
-    """放弃面试:把 status 置为 abandoned,不生成报告.
-
-    与 finish 的区别:finish 会调用 LLM 生成最终报告(耗时),
-    abandon 直接标记状态并保存,适合用户中途退出不想要报告的场景。
-    已 finished/abandoned 的面试不可重复放弃。
-    """
-    store = get_interview_store()
-    agent = get_agent()
-    iv = store.load(interview_id, model_client=agent.model_client)
-    if not iv:
+    """放弃面试:把 status 置为 abandoned,不生成报告."""
+    try:
+        agent = get_agent()
+        state = agent.abandon_interview(interview_id)
+        return {"success": True, "status": state.get("status", "abandoned")}
+    except ValueError:
         raise HTTPException(status_code=404, detail="Interview not found")
-    if iv.status in ("finished", "abandoned"):
-        return {"success": True, "status": iv.status}
-    iv.status = "abandoned"
-    store.save(iv)
-    return {"success": True, "status": "abandoned"}
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
 
 
 @router.get("/interview/{interview_id}/state", tags=["Interview"])
 async def get_interview_state(interview_id: str):
-    store = get_interview_store()
-    agent = get_agent()
-    iv = store.load(interview_id, model_client=agent.model_client)
-    if not iv:
+    try:
+        agent = get_agent()
+        state = agent.get_interview_state(interview_id)
+        return {"success": True, "state": _serialize_interview_state(state)}
+    except ValueError:
         raise HTTPException(status_code=404, detail="Interview not found")
-    return {"success": True, "state": _serialize_interview_state(iv)}
 
 
 @router.get("/interview", response_model=InterviewListResponse, tags=["Interview"])
@@ -1174,3 +1140,102 @@ async def delete_interview(interview_id: str):
     if not deleted:
         raise HTTPException(status_code=404, detail="Interview not found")
     return {"success": True}
+
+
+# ── Ask 对话窗口 ──
+
+@router.post("/ask", tags=["Ask"])
+async def ask_agent(req: AskRequest):
+    """SSE 接口:与 agent 对话,实时返回回答.
+
+    后台线程执行 agent.ask(),通过队列把结果推回 SSE 流。
+    事件类型:
+    - thinking: 已收到消息,开始处理
+    - answer: 最终回答
+    - error: 处理出错
+    - done: 流结束
+    """
+    import asyncio
+    import threading
+    from queue import Queue, Empty
+
+    agent = get_agent()
+    # 可选:切换到指定分析的上下文
+    if req.analysis_id and req.analysis_id != agent.analysis.get("id"):
+        from hiremind import HireMindAgent, AnalysisStore, AskStore
+        ws = get_workspace()
+        agent = HireMindAgent.from_analysis(
+            model_client=agent.model_client,
+            workspace=ws,
+            analysis_store=AnalysisStore(ws.analyses_dir),
+            run_store=AskStore(ws.runs_dir),
+            analysis_id=req.analysis_id,
+        )
+
+    # 加载模拟面试状态供 context_manager 渲染
+    agent.current_interview_state = None
+    if req.interview_id:
+        store = get_interview_store()
+        agent.current_interview_state = store.load(req.interview_id)
+
+    # 组装页面上下文
+    page_context = req.context or ""
+    if req.page and not page_context:
+        page_context = f"用户当前在 {req.page} 页面"
+
+    message = req.message
+    queue: Queue = Queue()
+
+    def _run_ask():
+        try:
+            # on_token 回调:模型流式输出的每个 token 推入 queue
+            def _on_token(token: str):
+                queue.put({"type": "token", "content": token})
+
+            # on_status 回调:推送阶段状态(工具调用等)
+            def _on_status(status: str):
+                queue.put({"type": "status", "content": status})
+
+            answer = agent.ask(
+                message,
+                page_context=page_context,
+                on_token=_on_token,
+                on_status=_on_status,
+            )
+            queue.put({"type": "answer", "content": answer})
+        except Exception as exc:
+            queue.put({"type": "error", "content": str(exc)})
+        finally:
+            queue.put(None)  # sentinel
+
+    thread = threading.Thread(target=_run_ask, daemon=True)
+    thread.start()
+
+    async def event_generator():
+        # 立即发送 thinking 事件
+        yield f"data: {json.dumps({'type': 'thinking'}, ensure_ascii=False)}\n\n"
+
+        loop = asyncio.get_event_loop()
+        while True:
+            try:
+                item = await loop.run_in_executor(None, lambda: queue.get(timeout=1.0))
+            except Empty:
+                # 心跳保活
+                yield f"data: {json.dumps({'type': 'heartbeat'})}\n\n"
+                continue
+
+            if item is None:
+                break
+
+            yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
+
+            if item.get("type") in ("answer", "error"):
+                break
+
+        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )

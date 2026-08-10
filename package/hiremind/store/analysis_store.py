@@ -1,4 +1,7 @@
-"""AnalysisStore：分析的磁盘仓储."""
+"""分析记录服务:磁盘仓储 + 初始状态工厂.
+
+把每份分析序列化为 .hiremind/analyses/<id>.json,支持崩溃恢复和历史加载。
+"""
 
 from __future__ import annotations
 
@@ -93,7 +96,7 @@ class AnalysisStore:
         return False
 
 
-def new_analysis(title: str = "", metadata: Optional[Dict[str, Any]] = None, model: str = "") -> Dict[str, Any]:
+def new_analysis_state(title: str = "", metadata: Optional[Dict[str, Any]] = None, model: str = "") -> Dict[str, Any]:
     """创建一份新的分析字典.
 
     model: 启动本次分析时后端使用的模型名称,用于前端显示"本次分析使用的模型",

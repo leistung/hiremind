@@ -13,7 +13,7 @@
 ├── model_config.json      # 模型配置(供应商/模型/API Key/Base URL)
 ├── analyses/              # 分析记录(异步分析 + SSE 进度)
 │   └── analysis-<id>.json
-├── runs/                  # 单次 ask() 运行审计(可选,默认不生成)
+├── runs/                  # Ask 助手单次 ask() 运行审计
 │   └── <run_id>/
 │       ├── task_state.json
 │       ├── trace.jsonl
@@ -133,59 +133,66 @@
 
 ---
 
-### 2.3 `runs/` — 单次运行审计
+### 2.3 `runs/` — Ask 助手单次运行审计
 
-**用途**:记录单次 `agent.ask()` 的执行过程,用于调试与审计。**默认不生成**,仅在 Agent 控制循环走 `ask()` 路径时产生(直连 `run_full_analysis` 不产生 run 审计)。
+**用途**:记录单次 `agent.ask()` 的执行过程,用于调试与审计。每次 Ask 助手对话(`POST /api/ask`)都会产生一个 run 目录。
 
-**生成时机**:`RunStore.start_run()` 创建,`_finalize_run()` 写入最终状态。
+**生成时机**:`AskStore.start_run()` 创建,`_finalize_run()` 写入最终状态与报告。
 
-**管理者**:`package/hiremind/run_store.py` 的 `RunStore`
+**管理者**:`package/hiremind/store/ask_store.py` 的 `AskStore` + `AskState`(合并了旧版 `run_store.py` + `task_state.py`)
 
-**命名规则**:`<run_id>/`(run_id 为时间戳 + hash),每个 run 一个独立目录
+**命名规则**:`<run_id>/`(`run-<uuid12>`),每个 run 一个独立目录
 
 **目录结构**:
 
 ```
 runs/<run_id>/
-├── task_state.json    # 任务状态机快照
+├── task_state.json    # AskState 状态机快照
 ├── trace.jsonl        # 执行轨迹(每行一个 JSON 事件)
-└── report.json        # 运行报告
+└── report.json        # 运行摘要
 ```
 
-**`task_state.json` 字段**:
+**`task_state.json` 字段**(AskState dataclass):
 
 ```json
 {
-  "run_id": "...",
+  "run_id": "run-a1b2c3d4e5f6",
+  "task_id": "task-a1b2c3d4",
+  "user_request": "帮我分析一下这个岗位",
   "status": "completed",           // running / completed / stopped / failed
-  "stop_reason": "success",        // success / step_limit / retry_limit / model_error
-  "attempts": 3,
-  "tools_used": ["run_analysis"],
-  "started_at": "...",
-  "finished_at": "..."
+  "tool_steps": 1,
+  "attempts": 1,
+  "last_tool": "run_analysis",
+  "stop_reason": "final_answer",   // final_answer / step_limit / retry_limit / model_error / tool_error
+  "final_answer": "...",
+  "created_at": "...",
+  "updated_at": "..."
 }
 ```
 
-**`trace.jsonl` 格式**(每行一个事件):
+**`trace.jsonl` 格式**(每行一个事件,`timestamp` + `run_id` + `event` + `payload`):
 
 ```jsonl
-{"event": "model_call", "step": 1, "timestamp": "..."}
-{"event": "tool_call", "name": "run_analysis", "step": 1, "timestamp": "..."}
-{"event": "tool_result", "name": "run_analysis", "step": 1, "timestamp": "..."}
-{"event": "final", "step": 2, "timestamp": "..."}
+{"timestamp": "...", "run_id": "...", "event": "prompt_built", "payload": {"step": 1}}
+{"timestamp": "...", "run_id": "...", "event": "model_response", "payload": {"step": 1, "raw": "..."}}
+{"timestamp": "...", "run_id": "...", "event": "tool_called", "payload": {"name": "run_analysis", "args": {...}}}
+{"timestamp": "...", "run_id": "...", "event": "tool_result", "payload": {"name": "run_analysis", "result": "..."}}
+{"timestamp": "...", "run_id": "...", "event": "run_finished", "payload": {"stop_reason": "final_answer"}}
 ```
 
-**`report.json`**:运行摘要,包含最终答案、工具调用统计、耗时等。
+事件类型:`prompt_built` / `model_response` / `model_error` / `tool_called` / `tool_result` / `retry` / `run_finished`。
+
+**`report.json`**:运行摘要,包含 `run_id` / `task_id` / 最终答案、工具调用统计、耗时等。
 
 ---
 
 ### 2.4 `memory/` — 跨 session 持久记忆
 
-**用途**:存储 Agent 的长期记忆,跨 session 保留简历版本、岗位偏好、技能笔记、面试摘要。与 `sessions/` 中每个 session 独立的 `memory` 字段不同,这里的记忆是全局共享的。
+**用途**:存储 Agent 的长期记忆,跨 analysis 保留简历版本、岗位偏好、技能笔记、面试摘要。与 `analyses/` 中每个 analysis 独立的 `memory` 字段不同,这里的记忆是全局共享的。
 
 **生成时机**:
 - `tool_run_analysis` 完成后,调用 `memory.save_resume_version()` / `memory.save_interview_summary()`
-- 用户在对话中表达偏好时,`memory.save_job_preference()` / `memory.save_skill_note()`
+- 向主题文件追加笔记时,`memory.append_topic_note(topic, note, tags)`
 
 **管理者**:`package/hiremind/memory.py` 的 `HireMindMemory` + `DurableMemoryStore`
 
@@ -238,7 +245,7 @@ runs/<run_id>/
 - 用户在 `/resumes` 页面点「新建简历」
 - 用户上传 Word/PDF 解析成功后自动创建
 
-**管理者**:`package/hiremind/services/resume_service.py` 的 `ResumeStore`
+**管理者**:`package/hiremind/store/resume_store.py` 的 `ResumeStore`(业务逻辑如结构化解析、模板导出仍在 `services/resume_service.py`)
 
 **命名规则**:`resume-<12位hex>.json`
 
@@ -283,7 +290,7 @@ runs/<run_id>/
 
 **生成时机**:用户在 `/positions` 页面新建职位。
 
-**管理者**:`package/hiremind/services/resume_service.py` 的 `PositionStore`
+**管理者**:`package/hiremind/store/position_store.py` 的 `PositionStore`
 
 **命名规则**:`pos-<12位hex>.json`
 
@@ -315,7 +322,7 @@ runs/<run_id>/
 
 **生成时机**:`POST /api/interview/start` 时创建。
 
-**管理者**:`package/hiremind/services/interview_service.py` 的 `InterviewStore` + `MockInterview`
+**管理者**:`package/hiremind/store/interview_store.py` 的 `InterviewStore`(状态机逻辑由 `nodes/interview_nodes.py` 的图节点驱动,`InterviewFlowGraph` 编排)
 
 **命名规则**:`iv-<12位hex>.json`
 
@@ -422,7 +429,7 @@ runs/<run_id>/
 |---|---|---|
 | `model_config.json` | 设置页首次保存 | `Settings.persist()` |
 | `analyses/*.json` | `POST /api/analysis/run` | `AnalysisStore.save()` |
-| `runs/<id>/` | `RunStore.start_run()` | `RunStore` |
+| `runs/<id>/` | `AskStore.start_run()` | `AskStore` |
 | `memory/resumes/*.md` | 分析完成后 | `HireMindMemory.save_resume_version()` |
 | `memory/topics/*.md` | 分析完成或用户表达偏好 | `HireMindMemory.save_*()` |
 | `resumes/*.json` | 用户新建或上传解析 | `ResumeStore.create()` |
@@ -474,7 +481,7 @@ cp -r .hiremind/ .hiremind-backup-$(date +%Y%m%d)/
 **关键文件优先级**:
 - **必须备份**:`model_config.json`(含 API Key)、`resumes/`、`positions/`、`analyses/`(含分析报告)
 - **建议备份**:`interviews/`、`memory/`、`assets/`
-- **可不备份**:`reports/`(可从 sessions 重新导出)、`runs/`(仅审计用)
+- **可不备份**:`reports/`(可从 analyses 重新导出)、`runs/`(仅审计用)
 
 ### 4.2 迁移
 
@@ -488,7 +495,7 @@ cp -r .hiremind/ .hiremind-backup-$(date +%Y%m%d)/
 # 清理 run 审计(不影响功能)
 rm -rf .hiremind/runs/
 
-# 清理导出的报告(可从 sessions 重新导出)
+# 清理导出的报告(可从 analyses 重新导出)
 rm -rf .hiremind/reports/
 
 # 清理孤立头像(简历已删除但头像未清理)
@@ -500,7 +507,7 @@ rm -rf .hiremind/reports/
 ## 五、安全注意事项
 
 1. **API Key 明文存储**:`model_config.json` 中 `api_key` 为明文,目录已 gitignore,但本地访问需注意权限
-2. **简历数据隐私**:`resumes/` / `sessions/` 含用户简历原文,勿提交到公开仓库
+2. **简历数据隐私**:`resumes/` / `analyses/` 含用户简历原文,勿提交到公开仓库
 3. **路径穿越防护**:`GET /api/assets/{filename}` 路由已做防护,拒绝 `../` 等路径
 4. **上传大小限制**:头像上传限 5MB,文档解析无硬限制(但 LLM 结构化耗时随文本长度增加)
 
@@ -508,6 +515,6 @@ rm -rf .hiremind/reports/
 
 ## 六、相关文档
 
-- [README.md](./README.md) — 项目概览与功能介绍
-- [ARCHITECTURE.md](./ARCHITECTURE.md) — 架构设计、文件职责、API 设计、开发指南
-- [package/ARCHITECTURE.md](./package/ARCHITECTURE.md) — 核心包架构详解(模型/agent/tool/记忆/存储)
+- [README.md](../README.md) — 项目概览与功能介绍
+- [ARCHITECTURE.md](ARCHITECTURE.md) — 架构设计、文件职责、API 设计、开发指南
+- [package/ARCHITECTURE.md](../package/ARCHITECTURE.md) — 核心包架构详解(模型/agent/tool/记忆/存储)

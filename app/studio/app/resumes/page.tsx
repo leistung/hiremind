@@ -103,6 +103,27 @@ function ResumesPage() {
     try {
       const r = await api.getResume(id);
       setCurrent(r.resume);
+      // 同步 URL 参数,让 Ask 助手能定位到当前查看的简历
+      // 用 replaceState 避免触发 Next.js 路由重新渲染/滚动
+      const url = new URL(window.location.href);
+      if (url.searchParams.get("resume") !== id) {
+        url.searchParams.set("resume", id);
+        window.history.replaceState(null, "", url);
+      }
+      // 写入 sessionStorage 供 Ask 助手读取当前查看的简历信息
+      try {
+        sessionStorage.setItem(
+          "hiremind:resume-state-v1",
+          JSON.stringify({
+            resumeId: id,
+            name: r.resume.name,
+            basicsName: r.resume.data?.basics?.name || "",
+            title: r.resume.data?.basics?.title || "",
+          }),
+        );
+      } catch {
+        // sessionStorage 写入失败不影响主流程
+      }
     } catch {
       setError("加载简历失败");
     } finally {

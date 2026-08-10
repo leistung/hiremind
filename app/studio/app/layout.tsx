@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import Sidebar from "@/components/Sidebar";
+import FloatingAskBall from "@/components/FloatingAskBall";
 
 export const metadata: Metadata = {
   title: "HireMind · AI 面试官工作台",
@@ -19,6 +20,7 @@ export default function RootLayout({
           <Sidebar />
           <main className="flex-1 min-w-0">{children}</main>
         </div>
+        <FloatingAskBall />
       </body>
     </html>
   );

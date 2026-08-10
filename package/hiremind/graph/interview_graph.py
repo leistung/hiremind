@@ -1,112 +1,82 @@
-"""LangGraph 工作流：JD + 简历 → 匹配度/业务场景/风险/五方向面试题."""
+"""模拟面试工作流图(InterviewFlowGraph)— 图状态化版本.
 
-from typing import Iterator, Tuple
+按 action 路由的 LangGraph:节点直接读写 InterviewFlowState,
+状态在图内管理,由外层(HireMindAgent + InterviewStore)负责持久化。
+
+用法:
+    graph = InterviewFlowGraph()
+    new_state = graph.invoke(state, "submit_answer", {"answer": "..."})
+
+HireMindAgent 持有本图实例,编排方法直接调用 invoke。
+node_io 记录每次执行的输入/输出,供 read_node_io 工具读取。
+"""
+
+from __future__ import annotations
+
+from typing import Any, Dict, Optional
 
 from langgraph.graph import END, START, StateGraph
 
-from ..models.schemas import InterviewInput, InterviewResult, InterviewState
-from ..nodes import (
-    analyze_match,
-    generate_preparation_tips,
-    generate_questions,
-    identify_risks,
-    infer_scenarios,
-    parse_jd,
-    parse_resume,
-)
-
-# 节点中文标签:用于流式进度展示
-NODE_LABELS = {
-    "parse_jd": "解析岗位要求",
-    "parse_resume": "解析简历",
-    "analyze_match": "匹配度分析",
-    "infer_scenarios": "推断业务场景",
-    "identify_risks": "识别风险点",
-    "generate_questions": "生成面试题",
-    "generate_tips": "生成准备建议",
-}
+from ..models.states import InterviewFlowState
+from ..nodes.interview_nodes import INTERVIEW_NODES
 
 
-class InterviewGraph:
-    """面试分析工作流入口."""
+def _route(state: InterviewFlowState) -> str:
+    """条件边路由:按 action 返回目标节点名."""
+    return state.get("action", "")
+
+
+class InterviewFlowGraph:
+    """模拟面试工作流入口(图状态化).
+
+    持有一个按 action 路由的 StateGraph,提供 invoke(state, action, payload) 方法。
+    每次调用执行一个节点,返回更新后的完整 state。
+    状态持久化由外层负责(InterviewStore),图本身不关心存储。
+    """
 
     def __init__(self):
         self._graph = self._build_graph()
 
-    @staticmethod
-    def _build_graph():
-        """构建 StateGraph."""
-        builder = StateGraph(InterviewState)
+    def _build_graph(self):
+        builder = StateGraph(InterviewFlowState)
 
-        # 节点注册
-        builder.add_node("parse_jd", parse_jd)
-        builder.add_node("parse_resume", parse_resume)
-        builder.add_node("analyze_match", analyze_match)
-        builder.add_node("infer_scenarios", infer_scenarios)
-        builder.add_node("identify_risks", identify_risks)
-        builder.add_node("generate_questions", generate_questions)
-        builder.add_node("generate_tips", generate_preparation_tips)
+        # 注册所有节点(节点函数接收 state,返回 state patch)
+        for name, fn in INTERVIEW_NODES.items():
+            builder.add_node(name, fn)
 
-        # 边：START 同时解析 JD 和简历
-        builder.add_edge(START, "parse_jd")
-        builder.add_edge(START, "parse_resume")
-
-        # 边：解析完成后并行执行三大分析
-        for source in ("parse_jd", "parse_resume"):
-            builder.add_edge(source, "analyze_match")
-            builder.add_edge(source, "infer_scenarios")
-            builder.add_edge(source, "identify_risks")
-
-        # 边：三大分析完成后生成题目与建议
-        for source in ("analyze_match", "infer_scenarios", "identify_risks"):
-            builder.add_edge(source, "generate_questions")
-
-        builder.add_edge("generate_questions", "generate_tips")
-        builder.add_edge("generate_tips", END)
+        # START 按 action 路由到对应节点
+        builder.add_conditional_edges(START, _route, path_map=list(INTERVIEW_NODES.keys()))
+        # 每个节点执行完结束
+        for name in INTERVIEW_NODES:
+            builder.add_edge(name, END)
 
         return builder.compile()
 
-    def run(self, input_data: InterviewInput) -> InterviewResult:
-        """执行完整工作流并返回结果."""
-        initial_state = InterviewState(input=input_data)
-        final_state = self._graph.invoke(initial_state)
+    def invoke(
+        self,
+        state: Dict[str, Any],
+        action: str,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """执行一个 action,返回更新后的完整 state.
 
-        if final_state.get("error"):
-            raise RuntimeError(final_state["error"])
+        Args:
+            state: 当前完整状态(从存储加载或新建)
+            action: 要执行的动作(start/submit_answer/next_question/...)
+            payload: 单次输入(如 {"answer": "..."} / {"answers": {...}})
 
-        return InterviewResult(
-            company_name=input_data.company_name,
-            job_title=input_data.job_title,
-            match_analysis=final_state["match_analysis"],
-            business_scenarios=final_state["business_scenarios"],
-            risks=final_state["risks"],
-            questions=final_state["questions"],
-            preparation_tips=final_state.get("preparation_tips") or [],
-        )
-
-    def stream_run(self, input_data: InterviewInput) -> Iterator[Tuple[str, str, dict]]:
-        """流式执行工作流,逐节点 yield (node_name, label, state_dict) 进度.
-
-        每完成一个节点,yield 一次。最后 yield ("done", "完成", final_state_dict)。
-        调用方可从 final_state_dict 组装 InterviewResult,无需二次 invoke。
-        注意:返回的是 dict(而非 InterviewState 实例),因为 LangGraph 流式
-        返回的 patch 是 dict,合并需要 dict 形式。
+        Returns:
+            更新后的完整 state(调用方负责持久化)
         """
-        initial_state = InterviewState(input=input_data)
-        # 用 dict 累积状态(InterviewState 是 BaseModel 不能用 ** 展开)
-        final_state: dict = {"input": input_data}
-        # stream_mode="updates":每个节点完成后 yield {node_name: state_patch}
-        for chunk in self._graph.stream(initial_state, stream_mode="updates"):
-            for node_name, patch in chunk.items():
-                if node_name in NODE_LABELS:
-                    # patch 可能是 dict 或 BaseModel,统一转 dict 合并
-                    if isinstance(patch, dict):
-                        final_state.update(patch)
-                    elif hasattr(patch, "model_dump"):
-                        final_state.update(patch.model_dump())
-                    yield (node_name, NODE_LABELS[node_name], final_state)
+        if action not in INTERVIEW_NODES:
+            return {**state, "error": f"未知 interview action: {action}"}
 
-        if final_state.get("error"):
-            raise RuntimeError(final_state["error"])
-
-        yield ("done", "完成", final_state)
+        input_state: InterviewFlowState = {
+            **state,
+            "action": action,
+            "payload": payload or {},
+            "output": None,
+            "error": None,
+        }
+        result = self._graph.invoke(input_state)
+        return dict(result)

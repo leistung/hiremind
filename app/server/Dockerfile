@@ -1,20 +1,25 @@
 # HireMind 后端镜像
 # 构建上下文需为项目根目录(需要 app/ 与 package/ 两部分代码)
 #   docker build -t hiremind-backend -f app/server/Dockerfile .
+# syntax=docker/dockerfile:1
 FROM python:3.11-slim
 
 # 编译依赖所需的工具链(pymupdf / docling 等含 C 扩展)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential \
-    && rm -rf /var/lib/apt/lists/*
+# --mount=type=cache:apt 缓存跨构建持久化,层失效也不重新下载
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+        build-essential
 
 WORKDIR /app
 
 # 先拷贝依赖清单,利用层缓存
 COPY requirements.txt ./
 # 用清华镜像加速(国内直连 PyPI 极慢,torch 等大包易超时)
+# --mount=type=cache:pip 下载缓存跨构建持久化,层失效也不重新下载
 # --timeout + --retries 防止大文件(如 torch 427MB)中途断开
-RUN pip install --no-cache-dir \
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install \
         -i https://pypi.tuna.tsinghua.edu.cn/simple \
         --timeout 300 \
         --retries 5 \
