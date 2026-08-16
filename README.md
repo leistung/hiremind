@@ -18,7 +18,59 @@ HireMind 是一个面向求职者的本地化 AI 面试助手。它把传统面�
 
 ---
 
-## 二、核心功能
+## 二、界面演示
+
+### 简历编辑器 `/resumes`
+
+三栏布局:左侧简历列表、中间结构化编辑表单、右侧实时预览。支持 Classic / Modern / Minimal 三套模板,可上传 PDF/Word 解析或手动新建,一键导出 Word/PDF。
+
+![简历编辑器](assets/01简历.png)
+
+### 职位库 `/positions`
+
+左侧搜索列表 + 右侧 JD 编辑表单,结构化录入公司名称、业务范围、职位名称、JD 正文、备注,适配匿名 JD 场景。
+
+![职位库](assets/02职位库.png)
+
+### 面试分析 `/analysis`
+
+输入 JD + 简历,异步执行 LangGraph 7 节点流水线,SSE 实时推送进度。完成后输出匹配度评分、业务场景、履历风险、面试题与备考建议。
+
+**分析进度节点**(SSE 7 阶段实时推送):
+
+![面试分析-节点](assets/03面试分析-节点.png)
+
+**分析结果报告**(匹配度评分环 + 场景推演 + 风险识别 + 面试题 + 备考建议):
+
+![面试分析-结果](assets/03面试分析-结果.png)
+
+### AI 模拟面试 `/interview`
+
+基于分析报告启动多阶段模拟面试(笔试 → 技术一面 → 技术二面 → 人事面),LLM 智能规划阶段方案,每阶段独立评分 + 软晋级。
+
+**智能阶段规划**(LLM 根据岗位/公司/薪资自动生成阶段方案):
+
+![模拟面试-生成](assets/04模拟面试-生成.png)
+
+**对话逐题交互**(即时评分 0-10 + 亮点 + 改进点):
+
+![模拟面试-回答](assets/04模拟面试-回答.png)
+
+### 历史记录 `/history`
+
+双 Tab(面试分析 / 模拟面试)统一归档,左侧卡片列表 + 右侧详情,支持溯源跳转到关联简历/职位/分析。
+
+![历史记录](assets/05历史记录.png)
+
+### 模型与配置 `/settings`
+
+6 个预设供应商(阿里云百炼 / OpenAI / DeepSeek / Moonshot / Anthropic / 自定义),一键填入默认值 + 连接测试 + 持久化到 `.hiremind/model_config.json`。
+
+![模型与配置](assets/06模型与配置.png)
+
+---
+
+## 三、核心功能
 
 ### 1. 简历编辑器 `/resumes`
 
@@ -98,7 +150,7 @@ START ──┬──> 解析 JD ──────┬──> 匹配度分析 �
 - **一键填入默认值**:选预设后自动填入 Base URL、推荐模型、API Key 输入框
 - **连接测试**:发送 ping 请求,返回延迟与回复,验证配置有效性
 - **持久化**:配置写入 `.hiremind/model_config.json`,重启后端不丢失;前端 localStorage 缓存避免重复拉取
-- **模型自动补全**:输入框关联 datalist,百炼预设提供 11 个模型快速选择
+- **模型自动补全**:输入框关联 datalist,百炼预设提供 13 个模型快速选择
 - **全局事件通知**:保存后派发 `hiremind:model-changed` 事件,侧边栏和 ModelBadge 实时刷新
 
 ### 7. 全局侧边栏
@@ -121,7 +173,7 @@ START ──┬──> 解析 JD ──────┬──> 匹配度分析 �
 
 ---
 
-## 三、技术栈
+## 四、技术栈
 
 | 层 | 技术 | 说明 |
 |---|---|---|
@@ -138,11 +190,11 @@ START ──┬──> 解析 JD ──────┬──> 匹配度分析 �
 
 ---
 
-## 四、快速开始
+## 五、快速开始
 
 ### 环境要求
 
-- Python 3.11+
+- Python 3.10+(见 [pyproject.toml](pyproject.toml) `requires-python`)
 - Node.js 20+(Tailwind v4 native binding 需要 glibc + Node 20+)
 - 一个 LLM API Key(推荐阿里云百炼,有免费额度)
 
@@ -194,7 +246,7 @@ docker compose up -d --build
 
 ---
 
-## 五、项目结构
+## 六、项目结构
 
 ```
 hiremind/
@@ -205,7 +257,9 @@ hiremind/
 │   │   ├── main.py             # FastAPI 入口 + CORS + API 日志中间件
 │   │   ├── routes.py           # 44 个 API 路由
 │   │   ├── schemas.py          # Pydantic 请求/响应模型
-│   │   ├── llm_logger.py       # LLM 调用日志回调
+│   │   ├── api_logger.py       # API 请求/响应日志中间件(按天落盘)
+│   │   ├── llm_logger.py       # LLM 调用日志回调(按天落盘)
+│   │   ├── fonts/              # 中文字体(Docker 内 PDF 导出用)
 │   │   └── Dockerfile          # 后端镜像(python:3.11-slim + 中文字体)
 │   └── studio/                 # Next.js 前端
 │       ├── app/                # 页面路由(App Router,6 个页面 + 首页)
@@ -232,7 +286,8 @@ hiremind/
 │   ├── ARCHITECTURE.md         # 项目整体架构
 │   ├── RUNTIME_DATA.md         # .hiremind/ 运行时数据目录说明
 │   └── llm-calls-overview.md   # LLM 调用全览
-├── scripts/                    # 诊断脚本
+├── assets/                     # 界面演示截图(README 引用)
+├── test/                       # 测试脚本(种子数据 / 分析 / 模拟面试)
 ├── .hiremind/                  # 运行时数据(gitignore)
 ├── docker-compose.yml          # 双服务编排
 ├── requirements.txt            # Python 依赖
@@ -244,7 +299,7 @@ hiremind/
 
 ---
 
-## 六、设计亮点
+## 七、设计亮点
 
 ### 1. Agent 控制循环 + LangGraph 双图架构
 
@@ -288,6 +343,6 @@ LLM 分析需 2-5 分钟,采用异步任务模式:
 
 ---
 
-## 七、License
+## 八、License
 
 私有项目,未开源。

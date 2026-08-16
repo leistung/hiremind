@@ -25,6 +25,7 @@ HireMind 采用 **三层分层架构**,职责清晰隔离:
 │  ├─ schemas.py (Pydantic 请求/响应模型)               │
 │  ├─ config.py (配置加载,优先级:JSON > 环境变量 > 默认) │
 │  ├─ deps.py (依赖注入,单例 agent / stores)            │
+│  ├─ api_logger.py (API 请求/响应日志中间件)           │
 │  └─ llm_logger.py (LLM 调用日志回调)                  │
 └──────────────────────┬──────────────────────────────┘
                        │ Python 函数调用
@@ -117,6 +118,7 @@ HireMind 采用 **三层分层架构**,职责清晰隔离:
 | `deps.py` | 依赖注入。提供 `get_agent`(`@lru_cache(maxsize=1)` 单例)/ `get_workspace` / `get_resume_store` / `get_position_store` / `get_interview_store` / `reset_agent`(清缓存重建 agent,配置变更后调用) |
 | `routes.py` | 44 个 API 路由,10 个 OpenAPI 分组(Health / Models / Documents / Resumes / Positions / Assets / Analysis / Interview / Export / Ask)。LLM 耗时调用用同步 `def`(FastAPI 自动放线程池),`upload_and_parse_resume` 用 `async def` + `asyncio.to_thread()` |
 | `schemas.py` | Pydantic 请求/响应模型,与前端 `types.ts` 对齐 |
+| `api_logger.py` | `APILoggingMiddleware` 中间件,记录 API 请求/响应日志,按天落盘到 `logs/api-access-YYYY-MM-DD.log` |
 | `llm_logger.py` | LangChain `BaseCallbackHandler` 钩子,记录每次 LLM 调用的请求/响应/token 用量,按天落盘到 `logs/llm-interaction-YYYY-MM-DD.log` |
 
 ---
