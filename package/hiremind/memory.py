@@ -22,7 +22,11 @@ def _now() -> str:
 
 
 def _tokenize(text: str) -> set:
-    """简单分词:提取中文词和英文单词,用于关键词召回."""
+    """简单分词:提取中文词和英文单词,用于关键词召回.
+
+    中文按连续汉字块切分(不按字),英文按单词(含 # + _ 等编程符号)。
+    无需引入 jieba 等分词库,求职场景的召回粒度足够。
+    """
     tokens = set(re.findall(r"[\u4e00-\u9fff]+|[a-zA-Z][a-zA-Z0-9_#+]*", text.lower()))
     return tokens
 
@@ -44,6 +48,8 @@ class DurableMemoryStore:
     DEFAULT_TOPICS = ["job-preferences", "skill-profile", "interview-history"]
 
     def __init__(self, root: Path):
+        # root 是 .hiremind/memory/;resumes 存简历快照,topics 存三类主题笔记,
+        # MEMORY.md 是索引(当前仅用于人工浏览,代码不依赖其内容)
         self.root = Path(root)
         self.resumes_dir = self.root / "resumes"
         self.topics_dir = self.root / "topics"
@@ -51,6 +57,7 @@ class DurableMemoryStore:
         self.ensure_dirs()
 
     def ensure_dirs(self) -> None:
+        """创建目录骨架与默认主题文件,幂等可重复调用."""
         self.root.mkdir(parents=True, exist_ok=True)
         self.resumes_dir.mkdir(parents=True, exist_ok=True)
         self.topics_dir.mkdir(parents=True, exist_ok=True)
@@ -68,7 +75,12 @@ class DurableMemoryStore:
         self.index_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     def save_resume_version(self, resume_text: str) -> str:
-        """保存简历版本快照,返回版本 ID."""
+        """保存简历版本快照,返回版本 ID.
+
+        版本 ID 由 日期 + 内容哈希前 8 位 组成:
+        - 日期前缀让同类快照可按时间排序;
+        - 内容哈希保证同一份简历重复保存会落到同一文件(天然去重)。
+        """
         date_str = datetime.now().strftime("%Y-%m-%d")
         content_hash = hashlib.sha256(resume_text.encode()).hexdigest()[:8]
         version_id = f"{date_str}_{content_hash}"
@@ -102,12 +114,15 @@ class DurableMemoryStore:
         """从所有 topic 中召回与 query 相关的笔记.
 
         使用 tag 精确命中 + 关键词重叠排序,不引入 embedding。
+        打分规则:与 query 分词重叠数越多的笔记越靠前(全文件扫描,
+        求职场景文件小、行数少,性能足够)。
         """
         query_tokens = _tokenize(query)
         candidates = []
         for path in self.topics_dir.glob("*.md"):
             topic = path.stem
             text = path.read_text(encoding="utf-8")
+            # 每行以 "- " 开头的即一条笔记,其余(标题/空行)跳过
             for line in text.split("\n"):
                 line = line.strip()
                 if not line.startswith("- "):

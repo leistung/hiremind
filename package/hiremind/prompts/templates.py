@@ -1,4 +1,15 @@
-"""LangChain Prompt 模板."""
+"""LangChain Prompt 模板.
+
+共 17 个 ChatPromptTemplate,分三组(与节点一一对应):
+1. 分析流水线(7 个):JD_PARSER / RESUME_PARSER / MATCH_ANALYSIS /
+   SCENARIO_BUILDER / RISK_IDENTIFIER / QUESTION_GENERATOR / PREPARATION_TIPS;
+2. 简历结构化(1 个):RESUME_STRUCTURE;
+3. 模拟面试(9 个):单场 4 个(首题/评价/下一题/最终报告)+ 多阶段 5 个
+   (笔试出题/批量评价/阶段总结/阶段首题/阶段规划)。
+
+约定:所有结构化输出的 prompt 都配合 with_structured_output 使用;
+自由文本的 prompt(首题/下一题)由节点直接接 llm。
+"""
 
 from langchain_core.prompts import ChatPromptTemplate
 

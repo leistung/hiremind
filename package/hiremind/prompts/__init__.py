@@ -1,3 +1,8 @@
+"""提示词包:统一导出全部 17 个 ChatPromptTemplate.
+
+用法:from hiremind.prompts import MATCH_ANALYSIS_PROMPT
+"""
+
 from .templates import (
     INTERVIEW_EVALUATE_PROMPT,
     INTERVIEW_FINAL_REPORT_PROMPT,

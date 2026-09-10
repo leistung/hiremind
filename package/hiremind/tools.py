@@ -48,6 +48,12 @@ def _safe_jsonable(obj: Any) -> Any:
         return str(obj)
 
 # ── 工具规格 ──
+#
+# 声明式工具清单,两个消费方:
+# 1. context_manager._render_prefix:把 name(schema)/description 渲染进系统提示词,
+#    让 LLM 知道"有哪些工具、各要什么参数";
+# 2. validate_tool:按 schema 做入参校验。
+# risky=True 的工具(save_to_workspace)会在前端做二次确认。
 
 TOOL_SPECS: List[Dict[str, Any]] = [
     {
@@ -123,7 +129,13 @@ TOOL_SPECS: List[Dict[str, Any]] = [
 # ── 参数校验 ──
 
 def validate_tool(name: str, args: Dict[str, Any]) -> None:
-    """通用参数校验，不合法则抛 ValueError."""
+    """通用参数校验，不合法则抛 ValueError.
+
+    规则:spec 中声明的每个参数都必须出现(必填检查);
+    但对"可选参数集合"里的 key(如 run_analysis 的 company_name)与
+    generate_more_questions 的 topic,允许缺失。
+    这样 LLM 少传一个可选参数不会被误判为错误,少传必填参数(如 resume)会被拦下。
+    """
     spec = next((s for s in TOOL_SPECS if s["name"] == name), None)
     if spec is None:
         raise ValueError(f"未知工具: {name}")
@@ -150,7 +162,15 @@ def validate_tool(name: str, args: Dict[str, Any]) -> None:
 # ── 工具执行函数 ──
 
 def tool_run_analysis(agent: "HireMindAgent", args: Dict[str, Any]) -> str:
-    """执行完整面试分析."""
+    """执行完整面试分析.
+
+    内部流程:
+    1. 组装 InterviewInput(JD 与简历必填,公司/岗位可选);
+    2. 调 agent.graph(AnalysisGraph)跑完整 DAG;
+    3. 把 InterviewResult 写入 analysis 并立即落盘(关键!直接调用不会经过 ask 的收尾);
+    4. 持久化简历版本与面试摘要到持久记忆(供 recall_memory 召回);
+    5. 返回 JSON 摘要,供 LLM 组织自然语言回答。
+    """
     from .models.schemas import InterviewInput
 
     input_data = InterviewInput(
@@ -176,6 +196,7 @@ def tool_run_analysis(agent: "HireMindAgent", args: Dict[str, Any]) -> str:
     agent.analysis_store.save(agent.analysis)
 
     # 持久化简历版本到持久记忆(供 recall_memory 工具召回)
+    # 失败静默:记忆写入只是锦上添花,不能因为记忆失败阻塞分析主流程
     try:
         agent.memory.save_resume_version(args["resume"])
         agent.memory.save_interview_summary(
@@ -219,6 +240,12 @@ def tool_run_analysis(agent: "HireMindAgent", args: Dict[str, Any]) -> str:
 def run_analysis_with_progress(agent: "HireMindAgent", args: Dict[str, Any], on_progress=None) -> str:
     """流式执行面试分析,每完成一个节点回调 on_progress(node_name, label).
 
+    与 tool_run_analysis 的区别:
+    - 走 graph.stream_run(),每完成一个节点 yield 一次;
+    - 同步维护 agent.analysis["node_io"],供 on_progress 回调方(后端路由)
+      把进度写入磁盘,SSE 轮询读取;
+    - 出错时先把已完成的 node_io 落盘再抛出,避免进度丢失。
+
     on_progress 签名: (node_name: str, label: str) -> None
     """
     from .models.schemas import InterviewInput, InterviewResult
@@ -238,6 +265,7 @@ def run_analysis_with_progress(agent: "HireMindAgent", args: Dict[str, Any], on_
     try:
         for node_name, label, state, patch in graph.stream_run(input_data):
             if node_name != "done":
+                # 记录节点产出(patch 转为 JSON 可序列化结构),供 read_node_io 读取
                 node_io_records.append({
                     "node": node_name,
                     "label": label,
@@ -252,6 +280,7 @@ def run_analysis_with_progress(agent: "HireMindAgent", args: Dict[str, Any], on_
                 final_state = state
     except Exception as exc:
         # stream_run 出错时保存已完成的 node_io,再向上抛出
+        # 保证前端进度页至少能看到"已完成到哪个节点"
         agent.analysis["node_io"] = node_io_records
         agent.analysis_store.save(agent.analysis)
         raise
@@ -311,7 +340,12 @@ def run_analysis_with_progress(agent: "HireMindAgent", args: Dict[str, Any], on_
 
 
 def tool_generate_more_questions(agent: "HireMindAgent", args: Dict[str, Any]) -> str:
-    """基于已有分析结果追加出题."""
+    """基于已有分析结果追加出题.
+
+    直接给 model_client 发一次补充出题请求(不经过图/工具注册表),
+    用已有 interview_result 作为上下文,按 direction/count/topic 约束生成。
+    返回的可能是 JSON 数组文本(由 LLM 决定),由上层 agent 继续加工。
+    """
     from langchain_core.messages import HumanMessage, SystemMessage
 
     direction = args.get("direction", "技术专业")
@@ -363,7 +397,11 @@ def tool_recall_memory(agent: "HireMindAgent", args: Dict[str, Any]) -> str:
 
 
 def tool_export_report(agent: "HireMindAgent", args: Dict[str, Any]) -> str:
-    """导出分析报告."""
+    """导出分析报告为 Word/PDF.
+
+    依赖 services/export_service 的 generate_word/generate_pdf 生成字节流,
+    写入 workspace.reports_dir,返回文件名供 LLM 告知用户。
+    """
     from .models.schemas import InterviewResult
     from .services.export_service import generate_pdf, generate_word
 
@@ -383,6 +421,7 @@ def tool_export_report(agent: "HireMindAgent", args: Dict[str, Any]) -> str:
     else:
         return f"错误：不支持的格式 {fmt}，请选择 word 或 pdf。"
 
+    # 文件名用公司/岗位拼出,并替换掉路径分隔符,避免生成非法文件路径
     safe_company = result.company_name.replace(" ", "_").replace("/", "_")
     safe_job = result.job_title.replace(" ", "_").replace("/", "_")
     filename = f"HireMind_{safe_company}_{safe_job}_面试分析.{ext}"
@@ -503,7 +542,11 @@ def tool_read_node_io(agent: "HireMindAgent", args: Dict[str, Any]) -> str:
 
 
 def _extract_id_from_context(agent: "HireMindAgent", pattern: str) -> str:
-    """从 page_context 字符串中正则提取 ID(如 position_id / resume_id)."""
+    """从 page_context 字符串中正则提取 ID(如 position_id / resume_id).
+
+    page_context 由前端在每次 ask() 时传入并暂存在 agent._current_page_context,
+    格式为"正在查看职位（ID: pos-xxx）"之类的中文模板,因此用中文括号匹配。
+    """
     context = getattr(agent, "_current_page_context", "") or ""
     match = re.search(pattern, context)
     return match.group(1) if match else ""
@@ -611,7 +654,12 @@ _TOOL_RUNNERS: Dict[str, Callable] = {
 
 
 def build_tool_registry(agent: "HireMindAgent") -> Dict[str, Callable]:
-    """构建工具注册表，把 agent 绑定到每个执行函数."""
+    """构建工具注册表，把 agent 绑定到每个执行函数.
+
+    用 functools.partial 把 agent 预绑定为每个 runner 的第一个参数,
+    得到 {tool_name: runner(args) -> str} 的执行器字典。
+    runtime.run_tool 从该字典取执行器,与 TOOL_SPECS 的声明解耦。
+    """
     import functools
 
     registry = {}

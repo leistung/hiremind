@@ -51,10 +51,21 @@ NODE_LABELS = {
 
 
 # ── 节点函数 ──
+#
+# 每个节点统一模式:
+#   1. get_llm() 取模型,with_structured_output 绑定输出模型;
+#   2. 用对应 Prompt | structured_llm 组成 LCEL chain;
+#   3. invoke 前把 state 中的上游产物转成 JSON 文本(prompt 输入);
+#   4. 成功返回 {"字段名": 结果} 的 patch;失败返回 {"error": ...},
+#      由 AnalysisFlowState 的 _merge_errors reducer 聚合。
 
 
 def parse_jd(state: AnalysisFlowState) -> dict:
-    """解析 JD,生成 JDProfile."""
+    """解析 JD,生成 JDProfile.
+
+    输入:state.input 的公司/岗位/业务范围/JD 原文;
+    输出:jd_profile(供后续分析节点引用,包括 resume 解析所需的 required_skills)。
+    """
     try:
         llm = get_llm()
         structured_llm = llm.with_structured_output(JDProfile)
@@ -73,7 +84,12 @@ def parse_jd(state: AnalysisFlowState) -> dict:
 
 
 def parse_resume(state: AnalysisFlowState) -> dict:
-    """解析简历,生成 ResumeProfile."""
+    """解析简历,生成 ResumeProfile.
+
+    依赖说明:若 jd_profile 已就绪则读取其 required_skills 作为
+    简历解析的参考项(帮助 LLM 判断"JD 要什么、简历有什么"),
+    未就绪时传"未提供"占位,不阻塞(与 parse_jd 并行,时序不保证)。
+    """
     try:
         required_skills = []
         if state.jd_profile:
@@ -158,7 +174,11 @@ def identify_risks(state: AnalysisFlowState) -> dict:
 
 
 def generate_questions(state: AnalysisFlowState) -> dict:
-    """生成按轮次组织的面试题(3-5 轮)."""
+    """生成按轮次组织的面试题(3-5 轮).
+
+    收束节点:依赖 jd/resume 画像 + 匹配度 + 场景 + 风险 全部就绪,
+    把所有中间产物以 JSON 文本拼进 prompt,让出题"贴简历、贴 JD"。
+    """
     try:
         llm = get_llm()
         structured_llm = llm.with_structured_output(InterviewQuestions)
@@ -205,12 +225,21 @@ def generate_preparation_tips(state: AnalysisFlowState) -> dict:
                 "risks": "\n\n".join(r.model_dump_json(indent=2) for r in (state.risks or [])),
             }
         )
-        return {"preparation_tips": result.tips}
+        # LLM 返回结构化的 PreparationTip(含 level + content),
+        # 这里拍平成 "【level】content" 字符串,保持下游 List[str] 契约不变
+        return {
+            "preparation_tips": [
+                f"【{t.level}】{t.content}" if t.level else t.content
+                for t in result.tips
+            ]
+        }
     except Exception as exc:  # pragma: no cover
         return {"error": f"备考建议生成失败: {exc}"}
 
 
 # 节点注册表:节点名 → 节点函数(与 AnalysisGraph 内部注册保持一致)
+# 存在意义:interview 侧 INTERVIEW_NODES 被 InterviewFlowGraph 直接消费;
+# 分析侧 AnalysisGraph 内部显式注册,本表供需要"按名取节点"的场景使用。
 ANALYSIS_NODES = {
     "parse_jd": parse_jd,
     "parse_resume": parse_resume,

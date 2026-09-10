@@ -13,6 +13,8 @@ if TYPE_CHECKING:
     from .runtime import HireMindAgent
 
 # 默认预算（字符数，非 token，粗略估算 1 字符 ≈ 0.5 token 中文 / 0.25 token 英文）
+# 预算机制的作用:不同模型上下文窗口差异大,超预算时按优先级压缩历史,
+# 保证长对话场景下 prompt 不会撑爆窗口。
 DEFAULT_TOTAL_BUDGET = 12000
 DEFAULT_SECTION_BUDGETS = {
     "prefix": 2000,
@@ -21,6 +23,8 @@ DEFAULT_SECTION_BUDGETS = {
     "history": 4500,
     "current_request": 1500,
 }
+# 压缩顺序:先压最"不关键"的面试状态与分析结果,再压历史,prefix 最后压
+# (prefix 承载系统角色与工具说明,压掉会导致 LLM 忘记工具契约)
 DEFAULT_REDUCTION_ORDER = ["interview_state", "interview_result", "history", "prefix"]
 RECENT_WINDOW = 6  # history 保留最近 N 轮不压缩
 
@@ -60,6 +64,12 @@ class InterviewContextManager:
     def build(self, user_message: str, page_context: str = "") -> Tuple[str, Dict]:
         """组装 prompt，返回 (prompt, metadata).
 
+        步骤:
+        1. 渲染 5 个 section(prefix/分析结果/面试状态/历史/当前请求);
+        2. 逐 section 按预算截断(current_request 永不裁剪);
+        3. 若总长仍超预算,按 reduction_order 逐段减半压缩;
+        4. 拼接为完整 prompt,并返回各段长度元数据供审计(写 trace)。
+
         page_context: 前端传入的页面上下文(当前页面 + 业务状态),
         拼到 current_request 前让 agent 知道用户在做什么。
         """
@@ -77,7 +87,13 @@ class InterviewContextManager:
         return prompt, metadata
 
     def _render_sections(self, user_message: str, page_context: str) -> Dict[str, Dict]:
-        """渲染各 section 文本."""
+        """渲染各 section 文本.
+
+        两阶段预算控制:
+        1. 单段截断:超出该段独立预算的直接截断(保留 current_request 完整);
+        2. 总量压缩:总长超 total_budget 时,按 reduction_order 逐段减半,
+           直到总长回到预算内或所有可压缩段都压到 200 字符下限。
+        """
         raw_texts = {
             "prefix": self._render_prefix(),
             "interview_result": self._render_interview_result(),
@@ -92,6 +108,7 @@ class InterviewContextManager:
             budget = self.section_budgets.get(name, 2000)
             if name == "current_request":
                 # current_request 永不裁剪
+                # 理由:当前问题被截断会导致答非所问,必须原样保留
                 text = raw
             elif len(raw) <= budget:
                 text = raw
@@ -134,7 +151,11 @@ class InterviewContextManager:
         return AGENT_PREFIX.format(tool_descriptions="\n".join(tool_descs))
 
     def _render_interview_result(self) -> str:
-        """渲染最近一次分析结果摘要(直接从 agent.analysis 读取)."""
+        """渲染最近一次分析结果摘要(直接从 agent.analysis 读取).
+
+        只取"人可读"的要点(公司/岗位/匹配度强弱点/场景/风险/出题数/建议数),
+        不塞原始 JSON,避免占预算且利于 LLM 直接引用。
+        """
         result = self.agent.analysis.get("interview_result")
         if not result:
             return ""
@@ -175,7 +196,12 @@ class InterviewContextManager:
         return "\n".join(lines)
 
     def _render_interview_state(self) -> str:
-        """渲染当前模拟面试状态(从 agent.current_interview_state 读取)."""
+        """渲染当前模拟面试状态(从 agent.current_interview_state 读取).
+
+        agent.current_interview_state 由 ask() 在用户进入面试相关页面时注入,
+        这里把"多阶段进度/当前题目/已出报告"压缩成几行文本,
+        让 LLM 在回答面试问题时知道自己正处于哪一轮、当前题是什么。
+        """
         state = self.agent.current_interview_state
         if not state:
             return ""
@@ -228,7 +254,11 @@ class InterviewContextManager:
         return user_message
 
     def _render_history(self) -> str:
-        """渲染对话历史，保留 recent_window 轮，更老的压缩."""
+        """渲染对话历史，保留 recent_window 轮，更老的压缩.
+
+        按"轮"保留最近 N 轮完整原文(user + assistant 两条算一轮,故 *2),
+        更早的历史只留一条省略提示,控制预算同时保留对话连续性。
+        """
         history = self.agent.analysis.get("history", [])
         if not history:
             return ""
@@ -250,7 +280,10 @@ class InterviewContextManager:
         return "\n".join(lines)
 
     def _assemble_prompt(self, sections: Dict[str, Dict]) -> str:
-        """把各 section 文本拼成完整 prompt."""
+        """把各 section 文本拼成完整 prompt.
+
+        只拼接非空段,段间用 \n\n---\n\n 分隔,给 LLM 清晰的分段信号。
+        """
         parts = []
         for name in ["prefix", "interview_result", "interview_state", "history", "current_request"]:
             text = sections[name]["text"]

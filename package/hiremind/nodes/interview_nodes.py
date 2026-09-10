@@ -112,6 +112,11 @@ DEFAULT_STAGE_CONFIGS: List[StageConfig] = [
 
 
 # ── 阶段映射(题库轮次 + 方向字段)──
+#
+# 分析题库存两种组织方式:rounds[](按轮次)与五个方向字段(兼容旧版)。
+# _STAGE_ROUND_MAPPING:阶段类型 → 应取哪些轮次(0 基);
+# _STAGE_DIRECTION_MAPPING:阶段类型 → 应取哪些方向字段。
+# 二者取并集;都为空时回退到全量题库(all_questions)。
 
 _STAGE_ROUND_MAPPING: Dict[InterviewStageType, List[int]] = {
     InterviewStageType.TECH_1: [0, 1],
@@ -138,10 +143,16 @@ def _now() -> str:
 
 
 def _flatten_questions(questions) -> List[Question]:
-    """把按轮次/方向组织的题目拍平为线性列表."""
+    """把按轮次/方向组织的题目拍平为线性列表.
+
+    面试启动时把 InterviewResult.questions 拍平存入 state["all_questions"],
+    之后出题/笔试兜底都从这个线性列表取,避免每个节点重复解析组织结构。
+    """
     flat: List[Question] = []
+    # 新版主结构:rounds[]
     for round_ in getattr(questions, "rounds", []) or []:
         flat.extend(round_.questions or [])
+    # 旧版兼容结构:五个方向字段
     for attr in (
         "resume_deep_dive", "business_scenario", "technical_professional",
         "behavioral_cultural", "pressure_adaptability",
@@ -153,7 +164,11 @@ def _flatten_questions(questions) -> List[Question]:
 def _questions_for_stage(
     result: InterviewResult, stage_type: InterviewStageType, all_questions: List[Question]
 ) -> List[Question]:
-    """根据阶段类型从题库提取对应题目."""
+    """根据阶段类型从题库提取对应题目.
+
+    规则:轮次映射 ∩ 方向映射的并集;若某阶段两类都没有(如笔试不入表),
+    回退用全量题库,保证任何阶段都有题可出。
+    """
     rounds = getattr(result.questions, "rounds", []) or []
     qs: List[Question] = []
     for idx in _STAGE_ROUND_MAPPING.get(stage_type, []):
@@ -167,6 +182,7 @@ def _questions_for_stage(
 
 
 def _analysis_summary(result: InterviewResult) -> str:
+    """把匹配度/风险压成 3 行摘要,作为 LLM 出题/评分的精简上下文."""
     ma = result.match_analysis
     return (
         f"匹配度: {ma.match_score}/100\n"
@@ -177,6 +193,11 @@ def _analysis_summary(result: InterviewResult) -> str:
 
 
 def _history_text(turns: List[InterviewTurn], full: bool = False) -> str:
+    """把轮次列表渲染成 Q/A 文本.
+
+    full=False:只含题目与回答(供下一题决策,避免评价内容泄漏);
+    full=True:追加评价与得分(供最终报告生成)。
+    """
     lines: List[str] = []
     for t in turns:
         lines.append(f"Q{t.turn_index}: {t.question}")
@@ -199,7 +220,11 @@ def _stage_history_text(stage_turns: List[InterviewTurn]) -> str:
 
 
 def _record_node_io(state: Dict, action: str, payload: Dict, output: Dict, error: Optional[str]) -> List:
-    """追加一条 node_io 记录."""
+    """追加一条 node_io 记录.
+
+    以 action 为键记录本次执行的输入/输出/错误,追加到 state["node_io"]。
+    read_node_io 工具按 action 名过滤读取,前端据此还原"每一步发生了什么"。
+    """
     entry = {
         action: {
             "label": NODE_LABELS.get(action, action),
@@ -213,7 +238,10 @@ def _record_node_io(state: Dict, action: str, payload: Dict, output: Dict, error
 
 
 # ── LLM 调用辅助函数 ──
-
+#
+# 每个 _llm_* 是"一次独立的 LLM 调用"的封装:
+# 从 input dict 取值,拼 prompt,绑定输出模型(自由文本除外),返回结构化结果。
+# 节点函数只负责编排与状态更新,LLM 调用细节全部收敛到这里。
 
 def _llm_recommend_stages(input: Dict) -> Dict:
     llm = get_llm()
@@ -339,9 +367,17 @@ def _llm_final_report(input: Dict) -> FinalReport:
 
 
 def _enter_stage(state: Dict, result: InterviewResult, all_questions: List[Question], stage_index: int) -> Dict:
-    """进入指定阶段,返回 state patch."""
+    """进入指定阶段,返回 state patch.
+
+    两条分支:
+    - 笔试阶段:LLM 一次性生成 5-20 题(失败兜底从题库取前 N 题),
+      写入 stage.written_questions,返回 __WRITTEN_READY__ 信号(无当前题);
+    - 对话阶段:取题库中该阶段的题目,LLM 口语化出第一题
+      (失败直接用题库首题原文),写入 turns 与当前阶段,返回 question_text。
+    """
     stage_configs = state.get("stage_configs") or []
     if stage_index >= len(stage_configs):
+        # 阶段索引越界说明所有阶段已跑完,直接进入收尾(生成最终报告)
         return _finish(state, result)
 
     cfg = StageConfig.model_validate(stage_configs[stage_index])
@@ -351,6 +387,7 @@ def _enter_stage(state: Dict, result: InterviewResult, all_questions: List[Quest
 
     if cfg.stage_type == InterviewStageType.WRITTEN:
         # 笔试:一次性生成所有题目
+        # 题数 clamp 在 [5, 20],与 StageConfig.question_count 的语义一致
         count = max(5, min(20, cfg.question_count))
         match_json = result.match_analysis.model_dump_json(indent=2)
         scenarios_json = "\n\n".join(s.model_dump_json(indent=2) for s in result.business_scenarios)
@@ -367,6 +404,7 @@ def _enter_stage(state: Dict, result: InterviewResult, all_questions: List[Quest
             })
             written_qs = questions[:count]
         except Exception:
+            # LLM 出题失败:从全量题库截取,保证笔试流程不中断
             written_qs = all_questions[:count]
 
         if stage_index < len(stages):
@@ -446,7 +484,14 @@ def _enter_stage(state: Dict, result: InterviewResult, all_questions: List[Quest
 
 
 def _complete_stage(state: Dict, result: InterviewResult, stage_index: int) -> Dict:
-    """完成当前阶段,生成阶段总结."""
+    """完成当前阶段,生成阶段总结.
+
+    流程:
+    1. 把本阶段 turns 渲染成 stage_log;
+    2. LLM 生成阶段总结(stage_score/stage_summary/promotion_hint);
+    3. LLM 失败时降级:按已评题目平均分 ×10 折算,按阈值生成晋级提示;
+    4. 标记该阶段 completed,记录 node_io。
+    """
     stages = [dict(s) for s in (state.get("stages") or [])]
     if stage_index >= len(stages):
         return {}
@@ -465,6 +510,7 @@ def _complete_stage(state: Dict, result: InterviewResult, stage_index: int) -> D
         stage["stage_summary"] = summary.stage_summary
         stage["promotion_hint"] = summary.promotion_hint
     except Exception:
+        # 降级:平均分 ×10 折算成 0-100,按阈值给通用晋级提示
         evaluated = [t for t in stage_turns if t.evaluated]
         avg = sum(t.score for t in evaluated) / max(1, len(evaluated)) * 10
         stage["stage_score"] = int(avg)
@@ -484,7 +530,14 @@ def _complete_stage(state: Dict, result: InterviewResult, stage_index: int) -> D
 
 
 def _finish(state: Dict, result: InterviewResult) -> Dict:
-    """生成最终报告,返回 state patch."""
+    """生成最终报告,返回 state patch.
+
+    流程:
+    1. 把全部 turns 渲染成完整 qa_log(含评价与得分);
+    2. LLM 生成最终报告(overall_score/strengths/weak_areas/suggestions/summary);
+    3. 降级:LLM 失败时 overall_score=0 + 错误摘要,再用已评平均分回填总分;
+    4. 组装 InterviewReport(多阶段模式附带分阶段成绩),状态置 finished。
+    """
     turns = [InterviewTurn.model_validate(t) for t in (state.get("turns") or [])]
     qa_log = _history_text(turns, full=True)
     report_data = None
@@ -503,6 +556,7 @@ def _finish(state: Dict, result: InterviewResult) -> Dict:
             "summary": f"报告生成失败: {exc}",
         }
 
+    # 已评题平均分 ×10 作为总分回填(LLM 返回 0 或缺失时用)
     evaluated = [t for t in turns if t.evaluated]
     avg_score = (sum(t.score for t in evaluated) / max(1, len(evaluated))) * 10
     overall = report_data.get("overall_score", 0) or int(avg_score)
@@ -539,10 +593,16 @@ def _finish(state: Dict, result: InterviewResult) -> Dict:
 
 
 # ── 节点函数(接收 state,返回 state patch)──
-
+#
+# 每个节点与 InterviewFlowGraph 的 action 一一对应,
+# 通过 graph.invoke(state, action, payload) 被调用。
 
 def recommend_stages_node(state: Dict[str, Any]) -> Dict[str, Any]:
-    """智能规划面试阶段方案(无状态,只用 payload)."""
+    """智能规划面试阶段方案(无状态,只用 payload).
+
+    不读会话状态,纯粹把 payload(公司/岗位/匹配度/场景/风险/期望轮次)
+    交给 LLM 规划,产出写入 output.stages。
+    """
     payload = state.get("payload") or {}
     try:
         out = _llm_recommend_stages(payload)
@@ -552,7 +612,12 @@ def recommend_stages_node(state: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def start_node(state: Dict[str, Any]) -> Dict[str, Any]:
-    """启动面试:初始化 stages(多阶段)或出第一题(单场)."""
+    """启动面试:初始化 stages(多阶段)或出第一题(单场).
+
+    多阶段:按 stage_configs 生成 stages 骨架,进入阶段 0;
+    单场:直接从全量题库出第一题(LLM 口语化改写,失败用题库首题)。
+    两种分支都会把 all_questions 拍平写入 state,后续节点不再重复解析。
+    """
     result = InterviewResult.model_validate(state["result"])
     all_questions = _flatten_questions(result.questions)
     is_multi = state.get("is_multi_stage", False)
@@ -622,7 +687,14 @@ def start_node(state: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def submit_answer_node(state: Dict[str, Any]) -> Dict[str, Any]:
-    """提交回答 + 即时评价."""
+    """提交回答 + 即时评价.
+
+    只评价"最近一道题"(turns 的最后一轮):
+    1. 校验:回答非空、面试已开始(存在 current_question 与 turns);
+    2. 把回答写入当前 turn,调 LLM 评价(score 0-10 + 评语 + 改进建议);
+    3. LLM 失败降级:5 分 + 错误信息评语;
+    4. 状态置 evaluated(下一题节点据此判断"上一题已评完")。
+    """
     payload = state.get("payload") or {}
     answer = (payload.get("answer") or "").strip()
     if not answer:
@@ -639,6 +711,7 @@ def submit_answer_node(state: Dict[str, Any]) -> Dict[str, Any]:
 
     current_turn = turns[-1]
     current_turn.answer = answer
+    # 参考答案优先用新字段 reference_answer,缺失回退到旧字段 reference_hint
     reference_answer = (
         current_q.reference_answer or current_q.reference_hint
         or "(无参考答案,请按回答完整度与深度评分)"
@@ -657,6 +730,7 @@ def submit_answer_node(state: Dict[str, Any]) -> Dict[str, Any]:
         current_turn.score = eva.score
         current_turn.improvements = eva.improvements
     except Exception as exc:
+        # 评价失败:给保底 5 分,保证阶段总结/最终报告的平均分可计算
         current_turn.evaluation = f"评价生成失败: {exc}"
         current_turn.score = 5
         current_turn.improvements = []
@@ -675,7 +749,18 @@ def submit_answer_node(state: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def next_question_node(state: Dict[str, Any]) -> Dict[str, Any]:
-    """出下一题(含阶段完成/面试结束判断)."""
+    """出下一题(含阶段完成/面试结束判断).
+
+    前置条件:上一题必须已评价(status == evaluated),防止重复出题跳过评价。
+
+    结束判断(按优先级):
+    1. 多阶段:当前对话阶段轮次达到上限 → _complete_stage,发 __STAGE_COMPLETED__;
+    2. 单场:总轮次达到 max_turns → _finish;
+    3. 题库用完且没有历史轮次 → _finish。
+
+    正常出题:LLM 基于历史表现从剩余题库挑/改写下一题(失败用题库首题原文),
+    并把新轮次同步到全局 turns 与当前阶段 turns。
+    """
     result = InterviewResult.model_validate(state["result"])
     all_questions = [Question.model_validate(q) for q in (state.get("all_questions") or [])]
     if not all_questions:
@@ -772,7 +857,14 @@ def next_question_node(state: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def submit_written_node(state: Dict[str, Any]) -> Dict[str, Any]:
-    """笔试批量提交 + 评价 + 阶段总结."""
+    """笔试批量提交 + 评价 + 阶段总结.
+
+    流程:
+    1. 按题目索引组织 answers(dict[int, str]),逐题构建 InterviewTurn;
+    2. LLM 批量评价(fail 时每题 5 分兜底),写入 stage_turns;
+    3. 阶段总结(与 _complete_stage 相同的 LLM/降级逻辑);
+    4. 状态置 evaluated,output 携带逐题成绩 + 阶段得分供前端展示。
+    """
     payload = state.get("payload") or {}
     answers: Dict[int, str] = {int(k): v for k, v in (payload.get("answers") or {}).items()}
 
@@ -789,6 +881,7 @@ def submit_written_node(state: Dict[str, Any]) -> Dict[str, Any]:
         return {"error": "笔试题目未生成"}
 
     # 构建 turns
+    # 未作答的题也生成 turn(答案留空),评价时 LLM 会看到"(未作答)"
     turns = [InterviewTurn.model_validate(t) for t in (state.get("turns") or [])]
     stage_turns: List[InterviewTurn] = []
     qa_pairs_parts: List[str] = []
@@ -875,7 +968,12 @@ def submit_written_node(state: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def advance_stage_node(state: Dict[str, Any]) -> Dict[str, Any]:
-    """阶段切换:进入下一阶段."""
+    """阶段切换:进入下一阶段.
+
+    用户确认晋级后调用:
+    - 还有阶段 → _enter_stage(next_idx),进入下一阶段出题;
+    - 已到末尾 → _finish,生成最终报告。
+    """
     result = InterviewResult.model_validate(state["result"])
     all_questions = [Question.model_validate(q) for q in (state.get("all_questions") or [])]
     if not all_questions:
@@ -884,19 +982,26 @@ def advance_stage_node(state: Dict[str, Any]) -> Dict[str, Any]:
     stage_configs = state.get("stage_configs") or []
     next_idx = state.get("current_stage_index", 0) + 1
     if next_idx >= len(stage_configs):
+        # 所有阶段已完成,收尾
         return _finish(state, result)
 
     return _enter_stage(state, result, all_questions, next_idx)
 
 
 def finish_node(state: Dict[str, Any]) -> Dict[str, Any]:
-    """主动结束面试,生成最终报告."""
+    """主动结束面试,生成最终报告.
+
+    与"自然结束"走同一 _finish 逻辑,前端"结束面试"按钮调用。
+    """
     result = InterviewResult.model_validate(state["result"])
     return _finish(state, result)
 
 
 def abandon_node(state: Dict[str, Any]) -> Dict[str, Any]:
-    """放弃面试(不生成报告)."""
+    """放弃面试(不生成报告).
+
+    幂等:若已 finished/abandoned 直接返回现状,不重复覆盖。
+    """
     if state.get("status") in ("finished", "abandoned"):
         return {"output": {"status": state["status"]}}
     return {"status": "abandoned", "output": {"status": "abandoned"}}

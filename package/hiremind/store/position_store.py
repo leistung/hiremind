@@ -70,6 +70,10 @@ class PositionStore:
         job_requirements: str = "",
         notes: str = "",
     ) -> Position:
+        """创建新职位(自动生成 pos-{12位hex} ID,立即落盘).
+
+        默认名称:公司 · 岗位;两者都空则用"未命名职位"。
+        """
         # 自动生成默认名称:公司+职位,若都为空则用"未命名职位"
         default_name = (
             name

@@ -29,7 +29,7 @@ pip install -e .
 ```python
 from hiremind import (
     HireMindAgent,       # 面试 Agent 运行时(最核心入口)
-    HireMindMemory,      # 分层记忆(工作记忆 + 持久记忆)
+    HireMindMemory,      # 持久记忆门面(跨 analysis,简历快照+主题笔记)
     HireMindWorkspace,   # 本地工作区管理(.hiremind/ 目录)
     AnalysisGraph,       # LangGraph 工作流:JD+简历→分析报告(一次性 DAG)
     InterviewGraph,      # AnalysisGraph 的向后兼容别名
@@ -71,7 +71,7 @@ agent = HireMindAgent(
     model_client=llm,
     workspace=workspace,
     analysis_store=AnalysisStore(workspace.analyses_dir),
-    ask_store=AskStore(workspace.runs_dir),
+    run_store=AskStore(workspace.runs_dir),
 )
 
 # 4. 直接执行分析(绕过 LLM 决策,直接调内部工具)
@@ -135,7 +135,7 @@ result = graph.run(InterviewInput(
 | `model_client` | `BaseChatModel` | LangChain Chat 模型,用 `get_llm()` 构造 |
 | `workspace` | `HireMindWorkspace` | 工作区 |
 | `analysis_store` | `AnalysisStore` | 分析存储 |
-| `ask_store` | `AskStore` | Ask 运行审计存储(合并了旧版 RunStore + TaskState) |
+| `run_store` | `AskStore` | Ask 运行审计存储(合并了旧版 RunStore + TaskState) |
 | `max_steps` | `int` | 单次 ask 最多调几次工具,默认 6 |
 | `max_retries` | `int` | 解析失败最多重试几次,默认 3 |
 | `analysis` | `dict \| None` | 传入则恢复历史分析记录,否则新建 |
@@ -149,8 +149,8 @@ result = graph.run(InterviewInput(
 | `run_full_analysis(...)` | 便捷方法,等价于 `run_tool("run_analysis", ...)` | 后端 `/api/analysis/run` 路由 |
 | `reset()` | 清空 analysis 开新对话 | 后端每次分析前都调它,避免覆盖历史 |
 | `from_analysis(analysis_id)` | 从历史分析恢复 agent | 后端 `/api/ask` 恢复对话 |
-| `recommend_interview_stages(analysis_id, expected_rounds)` | 智能规划面试阶段方案 | 后端 `/interview/stages/recommend` |
-| `start_interview(analysis_id, max_turns, stages)` | 启动多阶段模拟面试 | 后端 `/interview/start` |
+| `recommend_interview_stages(analysis_id, expected_rounds=4, company_business_scope="", jd_summary="")` | 智能规划面试阶段方案 | 后端 `/interview/stages/recommend` |
+| `start_interview(analysis_id, max_turns, stages)` | 启动多阶段模拟面试,返回 `(state, output)`(interview_id 在 state 中) | 后端 `/interview/start` |
 | `submit_interview_answer(interview_id, answer)` | 提交回答 + 即时评价 | 后端 `/interview/{id}/answer` |
 | `next_interview_question(interview_id)` | 生成下一题 | 后端 `/interview/{id}/next` |
 | `submit_interview_written(interview_id, answers)` | 笔试批量提交 | 后端 `/interview/{id}/written/submit` |
@@ -190,7 +190,7 @@ AnalysisGraph 提供两个执行入口:`run(input)` 一次性执行返回 Interv
 
 按 `action` 字段路由到 8 个节点(`recommend_stages` / `start` / `submit_answer` / `next_question` / `submit_written` / `advance_stage` / `finish` / `abandon`),每个节点执行完到 END。`invoke(state, action, payload)` 执行一个 action,返回更新后的完整 state。
 
-节点实现见 [nodes/interview_nodes.py](hiremind/nodes/interview_nodes.py),内部以 `_llm_*` 辅助函数封装 9 个 LLM 调用(智能规划 / 对话首题 / 笔试出题 / 批量评价 / 答题评价 / 下一题 / 阶段总结 / 最终报告)。
+节点实现见 [nodes/interview_nodes.py](hiremind/nodes/interview_nodes.py),内部以 `_llm_*` 辅助函数封装 9 个 LLM 调用(智能规划 / 单场首题 / 阶段首题 / 笔试出题 / 批量评价 / 答题评价 / 下一题 / 阶段总结 / 最终报告)。
 
 ### 4.4 数据模型
 
@@ -269,11 +269,11 @@ InterviewReport              # 最终报告
 | `AskStore` | Ask 运行审计 | `.hiremind/runs/<run_id>/` | 调试复盘,含 trace.jsonl |
 | `ResumeStore` | 简历 JSON | `.hiremind/resumes/<id>.json` | 简历 CRUD |
 | `PositionStore` | 职位 JSON | `.hiremind/positions/<id>.json` | 职位 CRUD |
-| `HireMindMemory` | 工作记忆 + 持久记忆 | session 内 + `.hiremind/memory/` | 注入 prompt 提供上下文 |
+| `HireMindMemory` | 持久记忆门面(简历快照 + 主题笔记) | `.hiremind/memory/` | 跨 analysis 记忆,供 recall_memory 工具召回 |
 
 **AnalysisStore 的原子写**:[store/analysis_store.py](hiremind/store/analysis_store.py) 的 `_write_atomic` 先写 tmp 再 replace,避免崩溃产生半截 JSON。项目里所有"分析结果不落盘"的 bug 最终都靠显式调 `analysis_store.save()` 解决。
 
-**AskStore 的 trace**:`.hiremind/runs/<run_id>/trace.jsonl` 每行一个事件(`prompt_built` / `model_response` / `model_error` / `tool_called` / `tool_result` / `retry` / `run_finished`),是排查 Agent 行为的第一现场。合并了旧版 `run_store.py`(磁盘)与 `task_state.py`(状态机)。
+**AskStore 的 trace**:`.hiremind/runs/<run_id>/trace.jsonl` 每行一个事件(`run_started` / `prompt_built` / `model_response` / `model_error` / `tool_called` / `tool_result` / `retry` / `run_finished`),是排查 Agent 行为的第一现场。合并了旧版 `run_store.py`(磁盘)与 `task_state.py`(状态机)。
 
 ### 4.6 工具系统
 
@@ -316,7 +316,7 @@ _agent = HireMindAgent(
     model_client=_llm,
     workspace=_workspace,
     analysis_store=AnalysisStore(_workspace.analyses_dir),
-    ask_store=AskStore(_workspace.runs_dir),
+    run_store=AskStore(_workspace.runs_dir),
 )
 
 def get_agent() -> HireMindAgent:
@@ -376,7 +376,10 @@ result = analysis.get("interview_result")
 stages = agent.recommend_interview_stages(analysis_id, expected_rounds=4)
 
 # 启动多阶段面试(analysis_id + stages 配置)
-interview_id = agent.start_interview(analysis_id, max_turns=8, stages=stages)
+# 注意:面试方法统一返回 (state, output) 元组,interview_id 在 state 里
+state, output = agent.start_interview(analysis_id, max_turns=8, stages=stages)
+interview_id = state["interview_id"]
+
 # 笔试阶段:启动时一次性生成题目,前端批量作答后提交
 agent.submit_interview_written(interview_id, {0: "...", 1: "..."})
 # 阶段推进(用户确认晋级)
@@ -431,7 +434,7 @@ package/hiremind/
 ├── __init__.py            # 顶层导出
 ├── runtime.py             # HireMindAgent 运行时
 ├── workspace.py           # HireMindWorkspace 工作区
-├── memory.py              # HireMindMemory 分层记忆
+├── memory.py              # HireMindMemory 持久记忆(简历快照+主题笔记)
 ├── context_manager.py     # ask 上下文组装器 + 预算控制
 ├── tools.py               # 8 个业务工具
 ├── graph/

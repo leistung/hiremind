@@ -24,9 +24,8 @@
 │         │                │            └──────────────────┘   │
 │         ▼                ▼                    │              │
 │  ┌─────────────────────────────────────────────────────────┐ │
-│  │              HireMindMemory (分层记忆)                   │ │
-│  │  ├─ Working Memory  (当前 analysis 的 JD/简历/结果)     │ │
-│  │  └─ Durable Memory  (.hiremind/memory/ 跨 analysis)     │ │
+│  │            HireMindMemory (持久记忆门面)                  │ │
+│  │  简历快照 + 主题笔记,落盘 .hiremind/memory/ 跨 analysis  │ │
 │  └─────────────────────────────────────────────────────────┘ │
 └───────────────────────────┬──────────────────────────────────┘
                             │ 持久化
@@ -201,7 +200,7 @@ class HireMindAgent:
         self.analysis_store = analysis_store    # 分析记录存储
         self.run_store = run_store              # Ask 运行审计(AskStore)
         # 内部组件
-        self.memory = HireMindMemory(...)       # 分层记忆
+        self.memory = HireMindMemory(...)       # 持久记忆门面(跨 analysis)
         self.context_manager = InterviewContextManager(self)  # prompt 组装
         self.analysis_graph = AnalysisGraph()   # 分析图 DAG
         self.interview_graph = InterviewFlowGraph()  # 面试图状态机
@@ -216,7 +215,7 @@ class HireMindAgent:
         self._current_page_context = ""         # Ask 页面上下文
 ```
 
-**关键设计**：`analysis` 字段是分析上下文容器，包含 history、memory 快照、interview_result、node_io、progress。
+**关键设计**：`analysis` 字段是分析上下文容器，包含 history、interview_result、node_io、progress 与溯源 metadata（上下文组装与历史页都读它）。
 
 ### 3.2 控制循环（ask）
 
@@ -263,8 +262,8 @@ ask(user_message, page_context)
 
 | 方法 | 用途 | 内部实现 |
 |------|------|----------|
-| `recommend_interview_stages(analysis_id, expected_rounds)` | 智能规划阶段方案 | `interview_graph.invoke(state, "recommend_stages", payload)`,失败降级到 `_fallback_stage_configs` |
-| `start_interview(analysis_id, max_turns, stages)` | 启动面试 | `interview_graph.invoke(state, "start", payload)` |
+| `recommend_interview_stages(analysis_id, expected_rounds=4, company_business_scope="", jd_summary="")` | 智能规划阶段方案 | `interview_graph.invoke(state, "recommend_stages", payload)`,失败降级到 `_fallback_stage_configs`(按轮次裁剪默认 4 阶段) |
+| `start_interview(analysis_id, max_turns, stages)` | 启动面试,返回 `(state, output)`(interview_id 在 state 中) | `interview_graph.invoke(state, "start", payload)` |
 | `submit_interview_answer(interview_id, answer)` | 提交回答 + 即时评价 | `interview_graph.invoke(state, "submit_answer")` |
 | `next_interview_question(interview_id)` | 生成下一题 | `interview_graph.invoke(state, "next_question")`,返回 question_text 或 signal |
 | `submit_interview_written(interview_id, answers)` | 笔试批量提交 | `interview_graph.invoke(state, "submit_written")` |
@@ -568,50 +567,52 @@ started → answering → evaluated → answering → ... → finished/abandoned
 
 源码：[memory.py](hiremind/memory.py)
 
-### 7.1 分层设计
+### 7.1 设计概览
+
+> 注意：早期版本曾有"Working Memory（随 analysis 存活）+ Durable Memory（落盘）"的分层设计，
+> 现**工作记忆层已移除**——分析图/面试图通过 LangGraph state 传递节点数据，
+> 对话上下文由 ContextManager 从 `analysis` 记录实时组装，不再需要单独的会话级记忆副本。
+> `memory.py` 现在只负责**跨 analysis 的持久记忆**。
 
 ```
-HireMindMemory
-├── Working Memory(随 analysis 存活)
-│    └── 存储在 analysis 记录的 memory 字段
-│
-└── Durable Memory(落盘 .hiremind/memory/,跨 analysis)
-     ├── resumes/YYYY-MM-DD_<hash>.md  # 简历版本归档
-     └── topics/
-          ├── interview-history.md     # 面试历史摘要
-          ├── job-preferences.md       # 岗位偏好
-          └── skill-profile.md         # 技能档案
+HireMindMemory（持久记忆门面，落盘 .hiremind/memory/，跨 analysis 存活）
+├── resumes/YYYY-MM-DD_<hash8>.md   # 简历版本归档（按日期+内容哈希去重）
+└── topics/
+     ├── interview-history.md       # 面试历史摘要
+     ├── job-preferences.md         # 岗位偏好
+     └── skill-profile.md           # 技能档案
 ```
 
-### 7.2 DurableMemoryStore
-
-负责持久记忆的读写：
+### 7.2 HireMindMemory 方法
 
 | 方法 | 作用 |
 |------|------|
-| `save_resume_version(text)` | 保存简历版本到 `resumes/`，返回版本 ID `{date}_{hash8}` |
+| `save_resume_version(text)` | 保存简历版本到 `resumes/`，返回版本 ID `{date}_{hash8}`（内容哈希 ⇒ 相同简历自动去重） |
 | `list_resumes()` | 列出所有简历版本 |
-| `append_topic_note(topic, note, tags)` | 向主题文件追加笔记 |
-| `recall_candidates(query, limit)` | 召回相关记忆（tag 精确匹配 + 关键词重叠排序） |
+| `append_topic_note(topic, note, tags)` | 向主题文件追加一条 `- ` 笔记（含自动 tag） |
+| `recall_candidates(query, limit=3)` | 召回相关笔记（关键词重叠排序） |
 
 ### 7.3 召回机制（无 embedding）
 
 ```python
 def recall_candidates(self, query, limit=3):
-    query_tokens = _tokenize(query)  # 简单分词
-    scored = []
-    for entry in self.index:
-        # tag 精确匹配 + 关键词重叠数排序
-        tag_match = query in entry.get("tags", [])
-        keyword_overlap = len(query_tokens & entry["tokens"])
-        score = (10 if tag_match else 0) + keyword_overlap
-        if score > 0:
-            scored.append((score, entry))
-    scored.sort(key=lambda x: -x[0])
-    return [e for _, e in scored[:limit]]
+    query_tokens = _tokenize(query)          # 中文按连续汉字块、英文按单词切分
+    candidates = []
+    for path in self.topics_dir.glob("*.md"):
+        topic = path.stem
+        for line in path.read_text(encoding="utf-8").split("\n"):
+            line = line.strip()
+            if not line.startswith("- "):    # 只把 "- " 开头的行当作笔记
+                continue
+            overlap = len(query_tokens & _tokenize(line[2:]))
+            if overlap > 0:
+                candidates.append({"topic": topic, "text": line[2:], "score": overlap})
+    candidates.sort(key=lambda x: x["score"], reverse=True)
+    return candidates[:limit]
 ```
 
-**设计决策**：求职场景记忆量有限（几十份简历/几十个岗位），tag + 关键词重叠足够召回，避免引入向量数据库和 embedding 模型的部署复杂度。
+**设计决策**：求职场景记忆量有限（几十份简历/几十个岗位），无需索引文件与 tag 精确匹配，
+直接全量扫描主题文件 + 关键词重叠排序即可召回，避免引入向量数据库和 embedding 模型的部署复杂度。
 
 ---
 
@@ -658,7 +659,7 @@ class AnalysisStore:
   "id": "analysis-a1b2c3d4e5f6",
   "title": "字节跳动-高级产品经理",
   "model": "qwen3.7-plus",
-  "status": "completed",          // pending / completed / error / cancelled
+  "status": "completed",          // pending / completed / error
   "progress": {                   // SSE 进度(异步分析时由后台线程写入)
     "completed": [{"node":"parse_jd","label":"解析JD"}],
     "current": null
@@ -666,7 +667,6 @@ class AnalysisStore:
   "node_io": [...],               // 节点级输入输出(read_node_io 工具读取)
   "interview_result": { ... },    // InterviewResult(AnalysisGraph 产出)
   "history": [...],               // 对话历史
-  "memory": { ... },              // 工作记忆快照
   "metadata": {                   // 溯源元数据
     "resume_id": "resume-xxx",
     "resume_name": "...",
@@ -763,7 +763,24 @@ class AskStore:
 └── report.json        # 运行摘要
 ```
 
-**trace.jsonl 事件类型**：`prompt_built` / `model_response` / `model_error` / `tool_called` / `tool_result` / `retry` / `run_finished`。
+**AskState 状态机流转**：
+
+```
+              create()                    finish_success()
+      ┌────────────┐     record_attempt    ┌─────────────┐
+      │  running   │ ────────────────────► │  completed  │
+      └────────────┘                       └─────────────┘
+        │       │
+        │       └─ stop_step_limit()  →  stopped (step_limit)
+        │       └─ stop_retry_limit() →  stopped (retry_limit)
+        └──────── stop_model_error() →  failed  (model_error)
+```
+
+- `status`: running / completed / stopped / failed（与前端轮询/报告页对应）
+- `stop_reason`: final_answer / step_limit / retry_limit / model_error / tool_error
+- 状态字段只通过方法更新（`finish_success` / `stop_step_limit` / `stop_retry_limit` / `stop_model_error`），状态机语义集中在 dataclass 内部
+
+**trace.jsonl 事件类型**：`run_started` / `prompt_built` / `model_response` / `model_error` / `tool_called` / `tool_result` / `retry` / `run_finished`（追加写，按时间顺序即执行轨迹）。
 
 ### 8.5 ResumeStore / PositionStore
 
@@ -944,7 +961,7 @@ LLM 分析需 2-5 分钟,同步路由会阻塞。改为:
 ### 12.4 为什么记忆不用 embedding?
 
 - 场景简单：求职记忆量有限（几十份简历/几十个岗位）
-- tag 精确匹配 + 关键词重叠排序已满足召回需求
+- 直接全量扫描主题文件 + 关键词重叠排序已满足召回需求
 - 避免引入向量数据库和 embedding 模型的部署复杂度
 
 ### 12.5 为什么 read_node_io 要从磁盘重新加载?

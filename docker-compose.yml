@@ -60,6 +60,17 @@ services:
     environment:
       # 服务端 rewrite 代理目标(容器内通过服务名访问后端)
       - BACKEND_URL=http://backend:8000
+      # dev 模式下 NEXT_PUBLIC_* 在运行时读取,需显式注入(生产模式由 build args 内联)
+      - NEXT_PUBLIC_API_BASE=${FRONTEND_API_BASE:-http://localhost:8000/api}
+      # 覆盖镜像内 NODE_ENV=production,确保 next dev 以开发模式运行
+      - NODE_ENV=development
+    volumes:
+      # 挂载前端源码:改完即生效(配合 next dev 热更新)
+      - ./app/studio:/app
+      # 保留镜像内 linux 版 node_modules,避免使用宿主机(macOS)安装的原生依赖
+      - /app/node_modules
+    # 覆盖 Dockerfile 的 CMD,以 dev 模式启动(next dev 支持 Fast Refresh)
+    command: ["npm", "run", "dev", "--", "-H", "0.0.0.0"]
     depends_on:
       backend:
         condition: service_healthy

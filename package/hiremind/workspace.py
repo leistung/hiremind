@@ -36,7 +36,11 @@ class HireMindWorkspace:
         self.assets_dir = self.hiremind_dir / "assets"
 
     def ensure_dirs(self) -> None:
-        """确保所有子目录存在."""
+        """确保所有子目录存在.
+
+        注意 memory/ 下的 resumes/topics 也一并创建,
+        与 DurableMemoryStore.ensure_dirs 重复但幂等,双保险。
+        """
         for d in (
             self.hiremind_dir,
             self.analyses_dir,
@@ -97,7 +101,12 @@ class HireMindWorkspace:
     # ── 指纹 ──
 
     def fingerprint(self) -> str:
-        """工作区状态指纹（用于判断是否有变化）."""
+        """工作区状态指纹（用于判断是否有变化）.
+
+        遍历 analyses/runs/reports 三个目录下所有文件的
+        相对路径 + mtime,做 sha256 摘要。前端用它判断
+        "工作区是否有新数据需要刷新"。
+        """
         h = hashlib.sha256()
         for d in (self.analyses_dir, self.runs_dir, self.reports_dir):
             if d.exists():

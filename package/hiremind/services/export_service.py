@@ -33,7 +33,11 @@ def _find_cjk_font() -> Optional[str]:
 
 
 def _format_questions(questions: InterviewQuestions) -> list[tuple[str, list[Question]]]:
-    """将五方向题目整理为顺序列表."""
+    """将五方向题目整理为顺序列表.
+
+    导出的题目按"方向"分组展示(旧版结构字段);
+    若新版 rounds 有内容而五方向字段为空,导出会缺题目——这是已知兼容取舍。
+    """
     return [
         ("方向一：简历深挖", questions.resume_deep_dive),
         ("方向二：业务场景题", questions.business_scenario),

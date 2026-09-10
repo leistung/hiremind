@@ -1,71 +1,90 @@
+/* globals.css —— 全局样式(暖色文档风,Notion-like)
+ *
+ * 内容分区:
+ * 1. 设计 token(:root CSS 变量,背景/前景/边框/品牌色/状态色/阴影/圆角)
+ * 2. 全局基础样式(body 字体/颜色/滚动条)
+ * 3. 通用组件类(card / btn / input / label / badge / section-title)
+ * 4. 动画(fade-in / pulse-soft)
+ * 5. Markdown 渲染样式(prose-warm / md-bubble)
+ */
+
+/* 引入 Tailwind CSS v4 */
 @import "tailwindcss";
 
+/* ═══════════════════════ 1. 设计 token ═══════════════════════
+ * 全部颜色/阴影/圆角集中在此,组件通过 var(--xxx) 引用,
+ * 保证全站视觉一致,换肤只需改这里。 */
 :root {
   /* 暖色文档风 - Notion-like */
-  --bg: #faf9f7;
-  --bg-elevated: #ffffff;
-  --bg-sidebar: #f5f2ec;
-  --bg-hover: #f0ece4;
-  --bg-muted: #f4f1ec;
-  --fg: #1c1917;
-  --fg-muted: #57534e;
-  --fg-subtle: #78716c;
-  --border: #e7e5e4;
-  --border-strong: #d6d3d1;
-  --accent: #c2410c;
-  --accent-hover: #9a3412;
-  --accent-soft: #fed7aa;
-  --accent-bg: #fff7ed;
-  --success: #15803d;
-  --success-soft: #dcfce7;
-  --warning: #b45309;
-  --warning-soft: #fef3c7;
-  --danger: #b91c1c;
-  --danger-soft: #fee2e2;
-  --info: #1d4ed8;
-  --info-soft: #dbeafe;
-  --shadow-sm: 0 1px 2px 0 rgb(28 25 23 / 0.04);
-  --shadow-md: 0 4px 12px -2px rgb(28 25 23 / 0.08), 0 2px 4px -2px rgb(28 25 23 / 0.04);
-  --shadow-lg: 0 12px 32px -4px rgb(28 25 23 / 0.1), 0 4px 8px -2px rgb(28 25 23 / 0.06);
-  --radius: 10px;
-  --radius-lg: 14px;
-  --radius-xl: 18px;
+  --bg: #faf9f7; /* 页面主背景(暖白) */
+  --bg-elevated: #ffffff; /* 抬升背景(卡片/弹层) */
+  --bg-sidebar: #f5f2ec; /* 侧边栏背景(更暖的米色) */
+  --bg-hover: #f0ece4; /* hover 背景 */
+  --bg-muted: #f4f1ec; /* 弱化背景(代码块/标签底) */
+  --fg: #1c1917; /* 主前景色(近黑暖棕) */
+  --fg-muted: #57534e; /* 弱化前景(次要文字) */
+  --fg-subtle: #78716c; /* 极弱前景(占位符/提示) */
+  --border: #e7e5e4; /* 常规边框 */
+  --border-strong: #d6d3d1; /* 强调边框(输入框/按钮描边) */
+  --accent: #c2410c; /* 品牌强调色(橙) */
+  --accent-hover: #9a3412; /* 品牌强调色 hover(深橙) */
+  --accent-soft: #fed7aa; /* 强调色浅版(标签/图标底) */
+  --accent-bg: #fff7ed; /* 强调色极浅底(徽章/聚焦光环) */
+  --success: #15803d; /* 成功绿 */
+  --success-soft: #dcfce7; /* 成功绿浅底 */
+  --warning: #b45309; /* 警告琥珀 */
+  --warning-soft: #fef3c7; /* 警告琥珀浅底 */
+  --danger: #b91c1c; /* 危险红 */
+  --danger-soft: #fee2e2; /* 危险红浅底 */
+  --info: #1d4ed8; /* 信息蓝 */
+  --info-soft: #dbeafe; /* 信息蓝浅底 */
+  --shadow-sm: 0 1px 2px 0 rgb(28 25 23 / 0.04); /* 轻阴影(卡片) */
+  --shadow-md: 0 4px 12px -2px rgb(28 25 23 / 0.08), 0 2px 4px -2px rgb(28 25 23 / 0.04); /* 中阴影(hover) */
+  --shadow-lg: 0 12px 32px -4px rgb(28 25 23 / 0.1), 0 4px 8px -2px rgb(28 25 23 / 0.06); /* 重阴影(弹层) */
+  --radius: 10px; /* 常规圆角(按钮/输入框) */
+  --radius-lg: 14px; /* 大圆角(卡片) */
+  --radius-xl: 18px; /* 特大圆角(弹窗/气泡) */
 }
 
+/* ═══════════════════════ 2. 全局基础 ═══════════════════════ */
+
+/* 统一盒模型:所有元素的宽高计算包含 padding 与 border */
 * {
   box-sizing: border-box;
 }
 
+/* body 基础排版:暖色背景 + 系统字体栈(优先苹方/微软雅黑) + 抗锯齿 */
 html,
 body {
-  background: var(--bg);
-  color: var(--fg);
+  background: var(--bg); /* 页面主背景 */
+  color: var(--fg); /* 主文字色 */
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
     "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", sans-serif;
-  font-size: 14px;
-  line-height: 1.6;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
+  font-size: 14px; /* 基准字号 */
+  line-height: 1.6; /* 基准行高 */
+  -webkit-font-smoothing: antialiased; /* 字体平滑(macOS/Chrome) */
+  -moz-osx-font-smoothing: grayscale; /* 字体平滑(macOS Firefox) */
 }
 
 /* 自定义滚动条 - 暖色调 */
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 8px; /* 纵向滚动条宽度 */
+  height: 8px; /* 横向滚动条高度 */
 }
 ::-webkit-scrollbar-track {
-  background: transparent;
+  background: transparent; /* 轨道透明 */
 }
 ::-webkit-scrollbar-thumb {
-  background: #d6d3d1;
-  border-radius: 4px;
+  background: #d6d3d1; /* 滑块暖灰色 */
+  border-radius: 4px; /* 圆角滑块 */
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #a8a29e;
+  background: #a8a29e; /* hover 加深 */
 }
 
-/* 通用工具类 - 暖色文档风 */
+/* ═══════════════════════ 3. 通用组件类 ═══════════════════════ */
 @layer components {
+  /* ── 卡片:白底 + 描边 + 轻阴影 ── */
   .card {
     background: var(--bg-elevated);
     border: 1px solid var(--border);
@@ -73,6 +92,7 @@ body {
     box-shadow: var(--shadow-sm);
   }
 
+  /* ── 可 hover 卡片:悬停时加深阴影 + 加粗边框 ── */
   .card-hover {
     transition: all 0.15s ease;
   }
@@ -81,6 +101,7 @@ body {
     border-color: var(--border-strong);
   }
 
+  /* ── 基础按钮:inline-flex 居中 + 统一间距/圆角/字号 ── */
   .btn {
     display: inline-flex;
     align-items: center;
@@ -93,23 +114,25 @@ body {
     line-height: 1.4;
     transition: all 0.15s ease;
     cursor: pointer;
-    border: 1px solid transparent;
-    white-space: nowrap;
-    user-select: none;
+    border: 1px solid transparent; /* 默认透明边框,变体各自覆盖 */
+    white-space: nowrap; /* 按钮文字不换行 */
+    user-select: none; /* 防止双击选中文字 */
   }
 
+  /* ── 主按钮:品牌橙底白字 ── */
   .btn-primary {
     background: var(--accent);
     color: #fff;
   }
   .btn-primary:hover {
-    background: var(--accent-hover);
+    background: var(--accent-hover); /* hover 加深 */
   }
   .btn-primary:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
+    opacity: 0.5; /* 禁用半透明 */
+    cursor: not-allowed; /* 禁用光标 */
   }
 
+  /* ── 次按钮:白底 + 描边 ── */
   .btn-secondary {
     background: var(--bg-elevated);
     color: var(--fg);
@@ -120,6 +143,7 @@ body {
     border-color: var(--fg-subtle);
   }
 
+  /* ── 幽灵按钮:透明底,弱化文字 ── */
   .btn-ghost {
     background: transparent;
     color: var(--fg-muted);
@@ -129,15 +153,17 @@ body {
     color: var(--fg);
   }
 
+  /* ── 危险按钮:红字 + 浅红描边 ── */
   .btn-danger {
     background: transparent;
     color: var(--danger);
     border-color: var(--danger-soft);
   }
   .btn-danger:hover {
-    background: var(--danger-soft);
+    background: var(--danger-soft); /* hover 浅红底 */
   }
 
+  /* ── 输入框:通栏宽度 + 描边 + 聚焦橙色光环 ── */
   .input {
     width: 100%;
     padding: 8px 12px;
@@ -147,22 +173,24 @@ body {
     font-size: 13px;
     color: var(--fg);
     transition: all 0.15s ease;
-    outline: none;
+    outline: none; /* 移除默认 outline,用自定义光环代替 */
   }
   .input:focus {
-    border-color: var(--accent);
-    box-shadow: 0 0 0 3px var(--accent-bg);
+    border-color: var(--accent); /* 聚焦描边变橙 */
+    box-shadow: 0 0 0 3px var(--accent-bg); /* 橙色聚焦光环 */
   }
   .input::placeholder {
-    color: var(--fg-subtle);
+    color: var(--fg-subtle); /* 占位符弱化色 */
   }
 
+  /* 多行文本域:允许纵向拉伸 + 继承字体 */
   textarea.input {
     resize: vertical;
     line-height: 1.6;
     font-family: inherit;
   }
 
+  /* ── 表单标签:小号加粗 + 弱化色 ── */
   .label {
     display: block;
     font-size: 12px;
@@ -172,17 +200,19 @@ body {
     letter-spacing: 0.01em;
   }
 
+  /* ── 徽章:胶囊形小标签(状态/分类标识) ── */
   .badge {
     display: inline-flex;
     align-items: center;
     gap: 4px;
     padding: 2px 8px;
-    border-radius: 999px;
+    border-radius: 999px; /* 全圆角胶囊 */
     font-size: 11px;
     font-weight: 500;
     line-height: 1.5;
   }
 
+  /* 徽章配色变体:不同语义色(浅底 + 深字) */
   .badge-accent {
     background: var(--accent-bg);
     color: var(--accent);
@@ -208,6 +238,7 @@ body {
     color: var(--fg-muted);
   }
 
+  /* ── 区块标题:左侧橙色竖条装饰 ── */
   .section-title {
     display: flex;
     align-items: center;
@@ -218,55 +249,66 @@ body {
     margin-bottom: 12px;
   }
 
+  /* 竖条装饰:通过 ::before 伪元素实现 */
   .section-title::before {
     content: "";
     display: block;
-    width: 3px;
-    height: 14px;
-    background: var(--accent);
-    border-radius: 2px;
+    width: 3px; /* 竖条宽度 */
+    height: 14px; /* 竖条高度 */
+    background: var(--accent); /* 品牌橙 */
+    border-radius: 2px; /* 圆角竖条 */
   }
 }
 
-/* 动画 */
+/* ═══════════════════════ 4. 动画 ═══════════════════════ */
+
+/* 淡入动画:从下方 4px 浮现 */
 @keyframes fadeIn {
   from {
     opacity: 0;
-    transform: translateY(4px);
+    transform: translateY(4px); /* 起始位置上移 4px */
   }
   to {
     opacity: 1;
-    transform: translateY(0);
+    transform: translateY(0); /* 最终位置 */
   }
 }
 
+/* 应用淡入动画:0.2s 缓动 */
 .fade-in {
   animation: fadeIn 0.2s ease;
 }
 
+/* 柔和呼吸动画:透明度在 1 ↔ 0.5 间循环(状态指示点用) */
 @keyframes pulse-soft {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.5; }
+  0%, 100% { opacity: 1; } /* 起始/结束:完全不透明 */
+  50% { opacity: 0.5; } /* 中间:半透明 */
 }
 
+/* 应用呼吸动画:1.5s 无限循环 */
 .pulse-soft {
   animation: pulse-soft 1.5s ease-in-out infinite;
 }
 
-/* Markdown 渲染 */
+/* ═══════════════════════ 5. Markdown 渲染 ═══════════════════════ */
+
+/* prose-warm:Markdown 正文排版(Ask 助手 / 分析报告的富文本容器) */
 .prose-warm {
   color: var(--fg);
   line-height: 1.7;
 }
+/* 标题:加粗 + 上下留白 */
 .prose-warm h1, .prose-warm h2, .prose-warm h3 {
   color: var(--fg);
   font-weight: 600;
   margin-top: 1.2em;
   margin-bottom: 0.5em;
 }
+/* 段落间距 */
 .prose-warm p {
   margin: 0.5em 0;
 }
+/* 列表:左缩进 */
 .prose-warm ul, .prose-warm ol {
   margin: 0.5em 0;
   padding-left: 1.5em;
@@ -274,6 +316,7 @@ body {
 .prose-warm li {
   margin: 0.2em 0;
 }
+/* 行内代码:暖灰底 + 圆角 + 等宽字体 */
 .prose-warm code {
   background: var(--bg-muted);
   padding: 2px 6px;
@@ -281,60 +324,70 @@ body {
   font-size: 0.9em;
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
 }
+/* 加粗 */
 .prose-warm strong {
   font-weight: 600;
   color: var(--fg);
 }
+/* 引用块:左侧橙色竖线 */
 .prose-warm blockquote {
   border-left: 3px solid var(--accent, #ea580c);
   padding-left: 0.75em;
   margin: 0.5em 0;
   color: var(--fg-muted, #78716c);
 }
+/* 分割线 */
 .prose-warm hr {
   border: none;
   border-top: 1px solid var(--border, #e7e5e4);
   margin: 1em 0;
 }
+/* 代码块:暖灰底 + 描边 + 横向滚动 */
 .prose-warm .md-code-block {
   background: var(--bg-muted, #f5f5f4);
   border: 1px solid var(--border, #e7e5e4);
   border-radius: 6px;
   padding: 0.75em 0.9em;
   margin: 0.6em 0;
-  overflow-x: auto;
+  overflow-x: auto; /* 超长代码横向滚动 */
   font-size: 0.85em;
   line-height: 1.5;
 }
+/* 代码块内的 code:去除行内样式(避免双重底色) */
 .prose-warm .md-code-block code {
   background: none;
   padding: 0;
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
 }
+/* 表格:合并边框 + 通栏宽度 */
 .prose-warm table {
   border-collapse: collapse;
   width: 100%;
   margin: 0.6em 0;
   font-size: 0.9em;
 }
+/* 单元格:细边框 + 内边距 + 顶对齐 */
 .prose-warm th, .prose-warm td {
   border: 1px solid var(--border, #e7e5e4);
   padding: 4px 8px;
   text-align: left;
   vertical-align: top;
 }
+/* 表头:暖灰底加粗 */
 .prose-warm th {
   background: var(--bg-muted, #f5f5f4);
   font-weight: 600;
 }
-/* 对话气泡里的表格:缩小字号 */
+
+/* ── md-bubble:对话气泡内的 Markdown 紧凑化 ── */
+/* 气泡宽度有限,统一缩小字号/间距 */
 .md-bubble table {
-  font-size: 0.78rem;
+  font-size: 0.78rem; /* 表格缩小字号 */
 }
 .md-bubble th, .md-bubble td {
-  padding: 3px 6px;
+  padding: 3px 6px; /* 单元格紧凑内边距 */
 }
-/* 对话气泡里的 markdown:缩小字号 + 适配气泡宽度 */
+/* 气泡内标题:缩小字号与间距 */
 .md-bubble h1, .md-bubble h2, .md-bubble h3 {
   font-size: 0.95rem;
   margin-top: 0.6em;
@@ -355,6 +408,7 @@ body {
 .md-bubble li {
   margin: 0.1em 0;
 }
+/* 气泡内代码块:进一步缩小 */
 .md-bubble .md-code-block {
   font-size: 0.78rem;
 }

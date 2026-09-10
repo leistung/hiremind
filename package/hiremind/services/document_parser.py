@@ -79,6 +79,11 @@ def parse_document(source: Union[str, Path]) -> str:
        - DOCX -> python-docx
        - DOC -> antiword（如系统已安装）
 
+    设计说明:
+    - docling 是"保结构"首选(输出 Markdown),但依赖模型/依赖较重,
+      因此降级链保证无 docling 环境(如精简 Docker)也能解析;
+    - 各类降级失败时抛出带根因的 RuntimeError,方便调用方/用户定位。
+
     Args:
         source: 本地文件路径
 

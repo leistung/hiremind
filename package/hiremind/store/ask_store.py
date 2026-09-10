@@ -36,7 +36,16 @@ def _now() -> str:
 
 @dataclass
 class AskState:
-    """一次 ask() 运行过程中的状态机快照."""
+    """一次 ask() 运行过程中的状态机快照.
+
+    状态流转:
+        running → completed(finish_success)
+                → stopped(stop_step_limit / stop_retry_limit)
+                → failed(stop_model_error)
+
+    每个字段都由对应方法更新(runtime.ask 不直接改字段),
+    保证状态机语义集中在数据类内部。
+    """
 
     run_id: str = ""
     task_id: str = ""
@@ -52,7 +61,10 @@ class AskState:
 
     @classmethod
     def create(cls, user_request: str) -> "AskState":
-        """工厂方法：创建一个新的运行状态."""
+        """工厂方法：创建一个新的运行状态.
+
+        run_id 12 位、task_id 8 位,均为 uuid hex(可读且不冲突)。
+        """
         run_id = f"run-{uuid4().hex[:12]}"
         task_id = f"task-{uuid4().hex[:8]}"
         return cls(run_id=run_id, task_id=task_id, user_request=user_request)
@@ -153,7 +165,10 @@ class AskStore:
         return path
 
     def start_run(self, task_state: AskState) -> Path:
-        """开始一次运行:创建目录 + 写初始 task_state."""
+        """开始一次运行:创建目录 + 写初始 task_state.
+
+        同时写第一条 run_started 事件,便于按 run_id 回溯每次 ask 的起点。
+        """
         run_dir = self.run_dir(task_state)
         run_dir.mkdir(parents=True, exist_ok=True)
         self.write_task_state(task_state)
@@ -174,7 +189,13 @@ class AskStore:
         event: str,
         payload: Optional[Dict[str, Any]] = None,
     ) -> Path:
-        """向 trace.jsonl 追加一条事件."""
+        """向 trace.jsonl 追加一条事件.
+
+        JSONL 每行一个事件,追加写(可流式审计),事件类型:
+        run_started / prompt_built / model_response / model_error /
+        tool_called / tool_result / retry / run_finished。
+        排查 Agent 决策过程时按时间顺序读即可。
+        """
         path = self.trace_path(task_state)
         path.parent.mkdir(parents=True, exist_ok=True)
         entry = {

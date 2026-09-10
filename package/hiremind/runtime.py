@@ -33,11 +33,15 @@ from .store.resume_store import ResumeStore
 from .tools import TOOL_SPECS, build_tool_registry, validate_tool
 from .workspace import HireMindWorkspace
 
+# ask() 控制循环的停止条件默认值:
+# - max_steps:单次 ask 最多允许 LLM 调几次工具(防止无限循环)
+# - max_retries:模型输出解析失败时最多重试几次(防止连续出错空转)
 MAX_STEPS_DEFAULT = 6
 MAX_RETRIES_DEFAULT = 3
 
 
 def _now() -> str:
+    # 统一使用 UTC ISO8601 时间戳,保证跨时区/跨机器可比较、可排序
     return datetime.now(timezone.utc).isoformat()
 
 
@@ -71,8 +75,11 @@ class HireMindAgent:
         self.max_steps = max_steps
         self.max_retries = max_retries
 
+        # 先确保 .hiremind/ 下 8 个子目录全部存在,后续落盘不依赖外部初始化
         self.workspace.ensure_dirs()
+        # 分层记忆:工作区根目录下的 .hiremind/memory/,跨 analysis 持久存活
         self.memory = HireMindMemory(workspace.root)
+        # 上下文组装器:仅供 ask() 使用,负责把分析结果/面试状态/历史拼进 prompt
         self.context_manager = InterviewContextManager(self)
         # 两个独立工作流图:分析图(一次性 DAG)+ 模拟面试图(按 action 路由)
         self.analysis_graph = AnalysisGraph()
@@ -84,10 +91,12 @@ class HireMindAgent:
         # 简历/职位存储(供 ask 工具读取当前查看的简历/职位详情)
         self.resume_store = ResumeStore(workspace.resumes_dir)
         self.position_store = PositionStore(workspace.positions_dir)
+        # 工具系统:specs 是声明式规格(LLM 可见),tools 是绑定 agent 的可执行注册表
         self.tools_spec = TOOL_SPECS
         self.tools = build_tool_registry(self)
 
         # 恢复或新建 analysis
+        # 传入 analysis(历史记录)时直接复用,否则新建一份初始状态
         if analysis:
             self.analysis = analysis
         else:
@@ -111,6 +120,7 @@ class HireMindAgent:
         on_status: 可选回调 (status: str) -> None,推送阶段状态(如"正在调用工具")。
         """
         # 1. 记 history + 创建 AskState
+        # 用户输入先落 history 并立即写盘,即使后续 LLM 失败也不丢上下文
         self._record_history("user", user_message)
         task_state = AskState.create(user_message)
         self.current_task_state = task_state
@@ -121,24 +131,31 @@ class HireMindAgent:
         retries = 0
 
         # 2. 主循环
+        # 循环不变量:每一轮要么执行一个工具(continue 回到顶部),
+        # 要么产出 final 答案返回(break),直到命中停止条件。
         while task_state.status == "running":
+            # 停止条件一:工具调用次数达到上限(防死循环)
             if task_state.tool_steps >= self.max_steps:
                 task_state.stop_step_limit()
                 break
+            # 停止条件二:重试次数达到上限(防模型反复输出坏 JSON)
             if retries >= self.max_retries:
                 task_state.stop_retry_limit()
                 break
 
             # 组装 prompt
+            # context_manager 按 5 个 section + 预算组装,并返回各段长度元数据用于审计
             prompt, metadata = self.context_manager.build(user_message, page_context)
             self.last_prompt_metadata = metadata
             task_state.record_attempt()
             self.ask_store.append_trace(task_state, "prompt_built", metadata)
 
             # 流式调模型:边接收边判断是否为纯文本答案
+            # (纯文本直接流式推送;JSON 指令整体累积,不推送)
             try:
                 raw_output = self._stream_model(prompt, on_token)
             except Exception as exc:
+                # 模型调用失败:记录错误并终止本轮,把错误作为最终答案返回
                 task_state.stop_model_error(str(exc))
                 self.ask_store.append_trace(task_state, "model_error", {"error": str(exc)})
                 break
@@ -148,9 +165,11 @@ class HireMindAgent:
             })
 
             # 3. 解析
+            # kind ∈ {tool, final, retry};纯文本会被 _parse 直接识别为 final
             kind, payload = self._parse(raw_output)
 
             if kind == "tool":
+                # ── 工具分支:执行工具后把结果作为新的 user 消息送回模型 ──
                 tool_name = payload.get("name", "")
                 tool_args = payload.get("args", {})
                 if on_status:
@@ -165,11 +184,13 @@ class HireMindAgent:
                     "result": tool_result[:1000],
                 })
                 # 把工具结果作为新的 user 消息送入下一轮
+                # 这样模型"看到"的是对话形式的历史,无需维护单独的工具消息通道
                 user_message = f"工具 {tool_name} 的执行结果：\n{tool_result}"
                 self._record_history("tool", user_message)
                 continue
 
             elif kind == "final":
+                # ── final 分支:拿到最终答案,收尾并返回 ──
                 answer = payload.get("answer", raw_output)
                 self._record_history("assistant", answer)
                 task_state.finish_success(answer)
@@ -177,6 +198,7 @@ class HireMindAgent:
                 return answer
 
             elif kind == "retry":
+                # ── retry 分支:模型主动要求补充信息,重试次数 +1 ──
                 retries += 1
                 retry_msg = payload.get("message", "需要更多信息")
                 user_message = f"[系统提示：模型请求重试] {retry_msg}\n请重新处理用户的原始请求。"
@@ -184,13 +206,14 @@ class HireMindAgent:
                 continue
 
             else:
-                # 无法解析，当作 final 直接返回原文
+                # ── 无法解析分支:兜底当作 final,直接返回原文,不阻塞用户 ──
                 self._record_history("assistant", raw_output)
                 task_state.finish_success(raw_output)
                 self._finalize_run(task_state, raw_output)
                 return raw_output
 
         # 步数/重试上限
+        # 命中停止条件时,若有部分答案则返回它,否则返回通用提示
         fallback = task_state.final_answer or "抱歉，处理过程中达到了步数上限，请重试。"
         self._record_history("assistant", fallback)
         self._finalize_run(task_state, fallback)
@@ -239,7 +262,12 @@ class HireMindAgent:
     # ── 工具执行 ──
 
     def run_tool(self, name: str, args: Dict[str, Any]) -> str:
-        """执行工具，带校验."""
+        """执行工具，带校验.
+
+        这是 LLM 调工具与外部直接调工具(如 run_full_analysis)的统一入口:
+        先做 schema 校验,再从注册表取执行器,异常统一转成字符串返回
+        (LLM 友好,便于作为下一轮消息喂回模型)。
+        """
         try:
             validate_tool(name, args)
         except ValueError as exc:
@@ -291,7 +319,13 @@ class HireMindAgent:
         return "final", {"answer": raw}
 
     def _extract_json(self, text: str) -> Optional[str]:
-        """从文本中提取 JSON 块(仅当文本以 { 开头时)."""
+        """从文本中提取 JSON 块(仅当文本以 { 开头时).
+
+        支持两种格式:
+        1. 代码块包裹:```json {...} ```,用正则直接提取;
+        2. 裸 JSON:从第一个 { 开始,按花括号深度匹配到第一个完整闭合的 }。
+        匹配失败返回 None,由 _parse 兜底按 final 处理。
+        """
         stripped = text.lstrip()
         if not stripped.startswith("{"):
             return None
@@ -300,6 +334,8 @@ class HireMindAgent:
         if match:
             return match.group(1)
         # 匹配第一个完整的 {...}
+        # 逐个字符计数花括号深度,深度归零即找到一个完整闭合对象
+        # (处理嵌套对象/数组,避免提前截断)
         start = text.find("{")
         if start != -1:
             depth = 0
@@ -395,9 +431,16 @@ class HireMindAgent:
     # 这些方法是对外的面试入口:加载/创建 InterviewFlowState,
     # 调用 interview_graph.invoke 执行节点,持久化 state。
     # routes 的 interview 端点统一调用这些方法。
+    #
+    # 通用模式:load state → invoke(action) → save state → 返回 (state, output)
+    # output 是节点产出的对前端有意义的结构(question_text / signal / report 等)。
 
     def _resolve_analysis(self, analysis_id: str) -> Dict[str, Any]:
-        """按 analysis_id 加载分析记录;与当前 agent 分析相同时直接返回内存副本."""
+        """按 analysis_id 加载分析记录;与当前 agent 分析相同时直接返回内存副本.
+
+        面试编排可能针对"历史某次分析"发起,而 agent 内存里只有当前 analysis;
+        这里保证:相同 ID 直接复用内存(避免重复读盘),不同 ID 从磁盘加载。
+        """
         if analysis_id and analysis_id != self.analysis.get("id"):
             analysis = self.analysis_store.load(analysis_id)
             if not analysis:
@@ -423,13 +466,20 @@ class HireMindAgent:
         company_business_scope: str = "",
         jd_summary: str = "",
     ) -> List[StageConfig]:
-        """智能规划面试阶段方案(走 interview_graph 的 recommend_stages 节点)."""
+        """智能规划面试阶段方案(走 interview_graph 的 recommend_stages 节点).
+
+        流程:
+        1. 加载分析记录并还原为 InterviewResult;
+        2. 把匹配度/场景/风险以 JSON 形式作为 payload 交给 recommend_stages 节点;
+        3. LLM 输出 StagePlan;失败或输出为空时降级到 _fallback_stage_configs。
+        """
         analysis = self._resolve_analysis(analysis_id)
         result_data = analysis.get("interview_result")
         if not result_data:
             raise ValueError("该分析尚未生成报告,请先在分析页生成报告")
         result = InterviewResult.model_validate(result_data)
 
+        # 结构化数据转 JSON 文本,作为 LLM 规划阶段的依据
         match_json = result.match_analysis.model_dump_json(indent=2)
         scenarios_json = "\n\n".join(
             s.model_dump_json(indent=2) for s in result.business_scenarios
@@ -456,6 +506,8 @@ class HireMindAgent:
         if not stages:
             return self._fallback_stage_configs(expected_rounds)
 
+        # 把 LLM 输出的原始 stage 字典规范化为 StageConfig:
+        # 按阶段类型 clamp 题数(笔试 5-20,对话阶段 1-9),保证后续节点不会越界
         configs: List[StageConfig] = []
         for item in stages:
             stage_type = InterviewStageType(item["stage_type"])
@@ -475,7 +527,13 @@ class HireMindAgent:
 
     @staticmethod
     def _fallback_stage_configs(expected_rounds: int) -> List[StageConfig]:
-        """LLM 失败时的降级方案:根据轮次数裁剪默认配置."""
+        """LLM 失败时的降级方案:根据轮次数裁剪默认配置.
+
+        兜底目标:即使阶段规划 LLM 完全不可用,面试也能按标准流程跑起来。
+        - >= 4 轮:直接用默认 4 阶段(笔试/一面/二面/HR)
+        - 3 轮:笔试 + 一面 + HR(去掉二面)
+        - <= 2 轮:一面 + HR(去掉笔试,只保留核心对话环节)
+        """
         base = list(DEFAULT_STAGE_CONFIGS)
         if expected_rounds >= len(base):
             return base
@@ -500,6 +558,12 @@ class HireMindAgent:
     ) -> tuple:
         """启动一场模拟面试,返回 (state, output).
 
+        流程:
+        1. 加载分析记录,还原 InterviewResult(面试题的来源);
+        2. 归一化阶段配置:过滤 disabled 阶段,统一转 StageConfig dict;
+        3. 创建初始 InterviewFlowState(stages 非空 ⇒ 多阶段模式);
+        4. 交给 start 节点执行,持久化后返回。
+
         output 包含 question_text(对话阶段)或 signal(笔试就绪)。
         """
         analysis = self._resolve_analysis(analysis_id)
@@ -511,6 +575,7 @@ class HireMindAgent:
         stage_configs: List[Dict[str, Any]] = []
         if stages:
             for s in stages:
+                # 前端可能传 enabled=false 表示跳过该阶段,这里直接过滤
                 if not s.get("enabled", True):
                     continue
                 stage_configs.append(StageConfig.model_validate(s).model_dump())

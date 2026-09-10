@@ -31,7 +31,11 @@ class InterviewStore:
         return self.root / f"{interview_id}.json"
 
     def save(self, interview_id: str, state: Dict[str, Any]) -> Path:
-        """保存 state 到 JSON 文件."""
+        """保存 state 到 JSON 文件.
+
+        直接写(非原子):面试状态高频更新,且每次都是完整 dict 覆写,
+        半截文件概率低;若需更强健壮性可换 _write_atomic 模式。
+        """
         path = self._path(interview_id)
         path.write_text(
             json.dumps(state, ensure_ascii=False, indent=2),
@@ -40,7 +44,11 @@ class InterviewStore:
         return path
 
     def load(self, interview_id: str) -> Optional[Dict[str, Any]]:
-        """加载 state,返回 dict 或 None."""
+        """加载 state,返回 dict 或 None.
+
+        文件不存在或 JSON 损坏都返回 None(由调用方报"面试不存在"),
+        避免损坏文件导致整个加载流程崩溃。
+        """
         path = self._path(interview_id)
         if not path.exists():
             return None
@@ -102,6 +110,7 @@ def new_interview_state(
         初始 InterviewFlowState dict(未持久化,调用方需 save)
     """
     # result 可能是 InterviewResult 对象或 dict
+    # (调用方 start_interview 传对象;直接构造 state 时可能传 dict)
     result_dict = result.model_dump() if hasattr(result, "model_dump") else result
 
     return {

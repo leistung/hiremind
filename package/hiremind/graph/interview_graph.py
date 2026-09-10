@@ -22,7 +22,11 @@ from ..nodes.interview_nodes import INTERVIEW_NODES
 
 
 def _route(state: InterviewFlowState) -> str:
-    """条件边路由:按 action 返回目标节点名."""
+    """条件边路由:按 action 返回目标节点名.
+
+    LangGraph 的 add_conditional_edges 用本函数做分发,
+    返回值必须落在 path_map 的键集合内(未知 action 由 invoke 提前拦截)。
+    """
     return state.get("action", "")
 
 
@@ -32,6 +36,10 @@ class InterviewFlowGraph:
     持有一个按 action 路由的 StateGraph,提供 invoke(state, action, payload) 方法。
     每次调用执行一个节点,返回更新后的完整 state。
     状态持久化由外层负责(InterviewStore),图本身不关心存储。
+
+    与 AnalysisGraph 的区别:
+    - AnalysisGraph 是一次性 DAG(一次 invoke 跑完整流水线);
+    - 本图每次 invoke 只执行"一个动作",状态在多次调用间由外层保存/恢复。
     """
 
     def __init__(self):
@@ -71,6 +79,8 @@ class InterviewFlowGraph:
         if action not in INTERVIEW_NODES:
             return {**state, "error": f"未知 interview action: {action}"}
 
+        # 组装单次执行状态:写入 action/payload,清空上轮的 output/error
+        # (这样节点总能拿到"本次该做什么"的干净输入)
         input_state: InterviewFlowState = {
             **state,
             "action": action,

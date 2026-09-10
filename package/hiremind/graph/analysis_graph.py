@@ -23,14 +23,28 @@ from ..nodes import (
 
 
 class AnalysisGraph:
-    """面试分析工作流入口(JD+简历 → 匹配度/场景/风险/题目/建议)."""
+    """面试分析工作流入口(JD+简历 → 匹配度/场景/风险/题目/建议).
+
+    一次性 DAG,拓扑固定(不是状态机):
+    - 第一层并行:parse_jd ∥ parse_resume
+    - 第二层并行:analyze_match ∥ infer_scenarios ∥ identify_risks
+    - 收束:generate_questions → generate_tips → END
+
+    提供两种执行入口:
+    - run():同步执行返回 InterviewResult(供工具/路由直接调用);
+    - stream_run():流式执行,逐节点 yield 进度(供异步分析 + SSE)。
+    """
 
     def __init__(self):
         self._graph = self._build_graph()
 
     @staticmethod
     def _build_graph():
-        """构建 StateGraph."""
+        """构建 StateGraph.
+
+        节点函数从 nodes/analysis_nodes 导入(同一份注册表,
+        与 ANALYSIS_NODES 保持一致);并行边由 LangGraph 自动 fan-out/fan-in。
+        """
         builder = StateGraph(AnalysisFlowState)
 
         # 节点注册
@@ -47,12 +61,14 @@ class AnalysisGraph:
         builder.add_edge(START, "parse_resume")
 
         # 边：解析完成后并行执行三大分析
+        # (JD 与简历任一完成即触发下游,三大分析各自等待所需输入就绪)
         for source in ("parse_jd", "parse_resume"):
             builder.add_edge(source, "analyze_match")
             builder.add_edge(source, "infer_scenarios")
             builder.add_edge(source, "identify_risks")
 
         # 边：三大分析完成后生成题目与建议
+        # (generate_questions 需等三大分析全部完成,LangGraph 自动做汇合)
         for source in ("analyze_match", "infer_scenarios", "identify_risks"):
             builder.add_edge(source, "generate_questions")
 
@@ -62,10 +78,15 @@ class AnalysisGraph:
         return builder.compile()
 
     def run(self, input_data: InterviewInput) -> InterviewResult:
-        """执行完整工作流并返回结果."""
+        """执行完整工作流并返回结果.
+
+        注意:run() 只负责计算,不落盘。
+        落盘由调用方(tool_run_analysis / 路由)显式调 analysis_store.save()。
+        """
         initial_state = AnalysisFlowState(input=input_data)
         final_state = self._graph.invoke(initial_state)
 
+        # 任一节点报错(由 _merge_errors 聚合)都向上抛,由调用方决定降级
         if final_state.get("error"):
             raise RuntimeError(final_state["error"])
 
@@ -96,6 +117,7 @@ class AnalysisGraph:
             for node_name, patch in chunk.items():
                 if node_name in NODE_LABELS:
                     # patch 可能是 dict 或 BaseModel,统一转 dict 合并
+                    # (并行节点各自产出不同字段,合并后才是完整状态快照)
                     if isinstance(patch, dict):
                         patch_dict = patch
                     elif hasattr(patch, "model_dump"):
@@ -109,7 +131,3 @@ class AnalysisGraph:
             raise RuntimeError(final_state["error"])
 
         yield ("done", "完成", final_state, {})
-
-
-# 向后兼容:旧代码用 InterviewGraph 指代分析图
-InterviewGraph = AnalysisGraph

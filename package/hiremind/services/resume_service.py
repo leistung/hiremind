@@ -19,6 +19,9 @@ from .llm_service import get_llm
 
 
 # ── 模板定义 ──
+#
+# 三套简历模板:classic/modern/minimal。
+# accent 是强调色(前端预览与 PDF 导出共用,保证两处版式一致)。
 
 TEMPLATES = {
     "classic": {
@@ -40,13 +43,18 @@ TEMPLATES = {
 
 
 def _safe_name(name: str) -> str:
+    """把任意字符串清洗成安全文件名(去非法字符,限长 60)."""
     return re.sub(r"[^\w\u4e00-\u9fa5\-]", "_", name or "未命名")[:60] or "未命名"
 
 
 # ── 结构化解析 ──
 
 def parse_resume_text_to_structured(text: str) -> ResumeData:
-    """把上传/粘贴的简历文本解析为结构化 ResumeData."""
+    """把上传/粘贴的简历文本解析为结构化 ResumeData.
+
+    LLM 解析,失败时返回空结构(基本信息带错误提示),
+    不让解析失败阻断"手动新建/编辑简历"流程。
+    """
     if not text or not text.strip():
         return ResumeData()
     try:
@@ -68,6 +76,10 @@ def parse_resume_text_to_structured(text: str) -> ResumeData:
 # ── 导出 ──
 
 def _find_cjk_font() -> Optional[str]:
+    """遍历 macOS/Linux/Windows 常见中文字体路径,返回第一个存在的.
+
+    跨平台导出中文 PDF 的必需步骤;找不到字体时抛 RuntimeError 提示用户。
+    """
     candidates = [
         "/System/Library/Fonts/PingFang.ttc",
         "/System/Library/Fonts/STHeiti Light.ttc",
@@ -87,6 +99,7 @@ def _resolve_photo_path(photo_url: str) -> Optional[Path]:
     """把 /api/assets/xxx.jpg 形式的 URL 解析为本地文件路径.
 
     在 cwd/.hiremind/assets/ 下查找。
+    用 Path(name).name 取最末段,防止 ../ 路径穿越攻击。
     """
     if not photo_url:
         return None
@@ -99,6 +112,7 @@ def _resolve_photo_path(photo_url: str) -> Optional[Path]:
     if not name:
         return None
     # 在 cwd/.hiremind/assets/ 下查找
+    # 优先当前工作目录,回退到包所在项目根目录
     candidates = [
         Path.cwd() / ".hiremind" / "assets" / name,
         Path(__file__).resolve().parents[3] / ".hiremind" / "assets" / name,
@@ -110,7 +124,11 @@ def _resolve_photo_path(photo_url: str) -> Optional[Path]:
 
 
 def export_resume_word(resume: Resume) -> bytes:
-    """导出简历为 Word(.docx)."""
+    """导出简历为 Word(.docx).
+
+    按 template 取强调色,结构:头像(可选) + 姓名大标题 + 意向/联系方式
+    + 简介/教育/工作/项目/技能分节。返回 .docx 字节流。
+    """
     try:
         from docx import Document
         from docx.shared import Pt, RGBColor, Inches
@@ -660,6 +678,7 @@ def _pdf_minimal(data, resume, font_path) -> bytes:
 
 
 def _hex_to_rgb(hex_color: str) -> tuple:
+    """把 #RRGGBB 转成 (r, g, b) 元组(fpdf 用);非法值回退黑色."""
     hex_color = hex_color.lstrip("#")
     if len(hex_color) == 6:
         return (

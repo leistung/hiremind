@@ -45,6 +45,10 @@ class ResumeStore:
             return None
 
     def save(self, resume: Resume) -> Resume:
+        """保存简历(新建时补 created_at,每次刷新 updated_at).
+
+        以 model_dump_json 序列化(含 data 结构),单文件存整份简历。
+        """
         ts = _now()
         if not resume.created_at:
             resume.created_at = ts
@@ -62,6 +66,7 @@ class ResumeStore:
         return False
 
     def create(self, name: str = "", data: Optional[ResumeData] = None) -> Resume:
+        """创建一份新简历(自动生成 resume-{12位hex} ID,立即落盘)."""
         resume = Resume(
             id=f"resume-{uuid.uuid4().hex[:12]}",
             name=name or "未命名简历",

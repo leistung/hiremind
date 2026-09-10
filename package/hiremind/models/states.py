@@ -26,8 +26,11 @@ from .schemas import (
 def _merge_errors(existing: Optional[str], new: Optional[str]) -> Optional[str]:
     """LangGraph reducer:合并多个并行节点可能产生的错误信息.
 
-    analyze_match / infer_scenarios / identify_risks 并行执行,
-    可能同时报错,reducer 把多个 error 字符串拼接,避免后写覆盖先写。
+    为什么需要:分析图第一层 parse_jd/parse_resume 与第二层
+    analyze_match/infer_scenarios/identify_risks 都是并行节点。
+    若没有 reducer,后写入的 error 会覆盖先写入的,导致只看到最后一个错误;
+    有了拼接逻辑,所有节点的失败原因都能保留。
+    LangGraph 中通过 Annotated[Optional[str], _merge_errors] 声明该字段用此 reducer。
     """
     if not new:
         return existing
@@ -42,6 +45,10 @@ class AnalysisFlowState(BaseModel):
     节点间通过本状态传递:
     input → jd_profile / resume_profile → match_analysis / business_scenarios / risks
     → questions → preparation_tips。
+
+    之所以用 Pydantic BaseModel(而非 TypedDict):
+    LangGraph 对 Pydantic 状态的节点更新按字段合并,
+    配合 _merge_errors 的 Annotated reducer 即可处理并行节点写冲突。
     """
 
     input: InterviewInput
@@ -62,6 +69,11 @@ class InterviewFlowState(TypedDict, total=False):
     1. 元数据(初始化时设置,只读):interview_id / analysis_id / result / ...
     2. 会话状态(节点可读写):status / turns / current_question / stages / ...
     3. 单次执行控制:action / payload / output / error
+       (action 由 invoke() 写入,路由节点按它分发;
+        output/error 由节点写入,invoke() 返回给外层)
+
+    total=False 使所有字段可选,节点 patch 只需返回改动的键。
+    状态整体由外层 InterviewStore 持久化为 JSON。
     """
 
     # ── 元数据 ──

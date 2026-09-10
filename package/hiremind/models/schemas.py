@@ -1,4 +1,16 @@
-"""Pydantic 模型：定义 HireMind 的输入、输出与中间状态."""
+"""Pydantic 模型：定义 HireMind 的输入、输出与中间状态.
+
+分层约定:
+- 简历/职位实体模型(Resume/Position):与前端编辑器、存储层一一对应;
+- 分析流水线模型(InterviewInput → JDProfile/ResumeProfile → MatchAnalysis/
+  BusinessScenario/Risk → InterviewQuestions → InterviewResult):
+  节点间通过 AnalysisFlowState 传递,LLM 结构化输出直接反序列化为这些类;
+- 模拟面试模型(InterviewStageType/StageConfig/InterviewTurn/
+  InterviewStageTurn/InterviewReport):InterviewFlowState 的组成部分。
+
+设计要点:所有字段尽量带默认值 + description,让 LLM 结构化输出
+(缺字段也能补默认)、前端渲染有中文说明。
+"""
 
 from enum import Enum
 from typing import Any, Dict, List, Optional
@@ -105,6 +117,7 @@ class InterviewInput(BaseModel):
 
     company_name 与 job_title 可选(留空时使用默认占位符),
     job_requirements(JD 正文)与 resume 必填。
+    这是 AnalysisGraph 的唯一入料,前端/工具统一按此结构传参。
     """
 
     company_name: str = Field(default="", description="目标公司名称,可选")
@@ -197,7 +210,12 @@ class InterviewRound(BaseModel):
 
 
 class InterviewQuestions(BaseModel):
-    """面试题(按轮次组织,3-5 轮)."""
+    """面试题(按轮次组织,3-5 轮).
+
+    rounds 是新版主结构(轮次推进,贴合真实面试);
+    resume_deep_dive 等五个方向字段是向后兼容的旧版结构,
+    保留为空列表以兼容旧导出与旧前端,不破坏序列化。
+    """
 
     rounds: List[InterviewRound] = Field(default_factory=list, description="面试轮次")
     # 向后兼容: 旧版按方向分组的字段(保留为空列表,不破坏旧导出)
@@ -221,6 +239,9 @@ class InterviewResult(BaseModel):
 
 
 # 用于结构化输出的包装模型
+# 说明:LLM 的 with_structured_output 需要顶层是"单个模型",
+# 因此把 List 包一层(BusinessScenarios/Risks/PreparationTips),
+# 节点函数拿到后再取 .scenarios/.risks/.tips 展开。
 class BusinessScenarios(BaseModel):
     """业务场景列表包装."""
 
@@ -233,10 +254,17 @@ class Risks(BaseModel):
     risks: List[Risk] = Field(default_factory=list)
 
 
+class PreparationTip(BaseModel):
+    """单条备考建议(带分级)."""
+
+    level: str = Field(default="", description="优先级: 紧急 / 参考")
+    content: str = Field(..., description="建议正文,2-3 句话")
+
+
 class PreparationTips(BaseModel):
     """备考建议列表包装."""
 
-    tips: List[str] = Field(default_factory=list)
+    tips: List[PreparationTip] = Field(default_factory=list)
 
 
 # 注:LangGraph 工作流状态(分析流状态 / 面试流状态)已迁移到 models/states.py
@@ -259,7 +287,11 @@ class InterviewTurn(BaseModel):
 # ── 多阶段面试模型 ──
 
 class InterviewStageType(str, Enum):
-    """面试阶段类型."""
+    """面试阶段类型.
+
+    str 子类枚举:序列化时直接存 "written"/"tech_1" 等字符串,
+    与前端约定一致,避免存枚举对象。
+    """
 
     WRITTEN = "written"              # 笔试
     TECH_1 = "tech_1"                # 技术一面(基础+项目)

@@ -1,3 +1,12 @@
+"""垂直能力服务包:需要单独 from hiremind.services import xxx.
+
+- get_llm:LLM 工厂(Claude/OpenAI 兼容);
+- parse_document:PDF/Word → Markdown 文本;
+- generate_word/generate_pdf:面试分析报告导出;
+- TEMPLATES / export_resume_word / export_resume_pdf / parse_resume_text_to_structured:
+  简历模板与导出、文本简历结构化。
+"""
+
 from .document_parser import parse_document
 from .export_service import generate_pdf, generate_word
 from .llm_service import get_llm

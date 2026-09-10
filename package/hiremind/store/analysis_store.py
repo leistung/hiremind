@@ -33,7 +33,12 @@ class AnalysisStore:
         return self.root / f"{analysis_id}.json"
 
     def _write_atomic(self, path: Path, data: dict) -> Path:
-        """原子写：先写 tmp 再 replace，避免半截 JSON."""
+        """原子写：先写 tmp 再 replace，避免半截 JSON.
+
+        为什么需要:分析过程会频繁 save(每次节点完成/对话每轮),
+        若进程崩溃或写盘被中断,rename 前的 tmp 文件不会损坏已存在的正式文件,
+        保证历史记录可恢复。
+        """
         path.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".tmp", dir=path.parent, delete=False
@@ -44,7 +49,11 @@ class AnalysisStore:
         return path
 
     def save(self, analysis: Dict[str, Any]) -> Path:
-        """保存分析到磁盘."""
+        """保存分析到磁盘.
+
+        若无 id 则自动生成(兜底);每次保存刷新 updated_at,
+        供 list_all 按修改时间倒序展示。
+        """
         analysis_id = analysis.get("id", "")
         if not analysis_id:
             analysis_id = f"analysis-{uuid4().hex[:12]}"
@@ -69,7 +78,11 @@ class AnalysisStore:
         return latest_file.stem
 
     def list_all(self) -> List[Dict[str, Any]]:
-        """列出所有分析摘要（不含完整 history）."""
+        """列出所有分析摘要（不含完整 history）.
+
+        摘要字段是历史页/列表页所需的最小集,避免把大段 history 读进内存。
+        单个文件损坏(JSONDecodeError)时跳过,不影响其余记录。
+        """
         result = []
         for path in sorted(self.root.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
             try:
