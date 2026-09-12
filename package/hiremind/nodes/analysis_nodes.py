@@ -89,7 +89,14 @@ def parse_resume(state: AnalysisFlowState) -> dict:
     依赖说明:若 jd_profile 已就绪则读取其 required_skills 作为
     简历解析的参考项(帮助 LLM 判断"JD 要什么、简历有什么"),
     未就绪时传"未提供"占位,不阻塞(与 parse_jd 并行,时序不保证)。
+
+    防漏填:LLM 结构化输出偶发省略列表字段,简历足够长时若关键字段
+    全部为空,用强化提示重试一次,显著降低空字段概率。
     """
+    resume_text = (state.input.resume or "").strip()
+    if not resume_text:
+        return {"resume_profile": ResumeProfile(), "warning": "简历文本为空"}
+
     try:
         required_skills = []
         if state.jd_profile:
@@ -98,13 +105,25 @@ def parse_resume(state: AnalysisFlowState) -> dict:
         llm = get_llm()
         structured_llm = llm.with_structured_output(ResumeProfile)
         chain = RESUME_PARSER_PROMPT | structured_llm
-        profile = chain.invoke(
-            {
-                "job_title": state.input.job_title,
-                "required_skills": ", ".join(required_skills) if required_skills else "未提供",
-                "resume": state.input.resume,
-            }
+        prompt_args = {
+            "job_title": state.input.job_title,
+            "required_skills": ", ".join(required_skills) if required_skills else "未提供",
+            "resume": resume_text,
+        }
+
+        profile = chain.invoke(prompt_args)
+
+        # 关键归纳字段:简历足够长却全部为空 → 疑似 LLM 漏填,重试一次
+        key_fields = (
+            "career_path",
+            "core_tech_stack",
+            "highlight_projects",
+            "quantified_achievements",
+            "potential_gaps",
         )
+        if len(resume_text) >= 200 and not any(getattr(profile, f) for f in key_fields):
+            profile = chain.invoke(prompt_args)
+
         return {"resume_profile": profile}
     except Exception as exc:  # pragma: no cover
         return {"error": f"简历解析失败: {exc}"}

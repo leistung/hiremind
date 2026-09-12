@@ -101,6 +101,17 @@ class StagePlan(BaseModel):
     stages: List[StagePlanItem] = Field(default_factory=list)
 
 
+class NextQuestion(BaseModel):
+    """LLM 出下一题的结构化输出:声明选题来源 + 口语化问题文本.
+
+    用 question_title 精确关联题库题目,避免改写后的文本与题库原文
+    子串匹配失败时错挂其他题目的 rationale / reference_answer。
+    """
+
+    question_title: str = Field(default="", description="选中的题库题目标题原文;若为临时追问则填空字符串")
+    question: str = Field(default="", description="下一道题的完整问题文本(可从题库题口语化改写)")
+
+
 # ── 默认阶段配置 ──
 
 DEFAULT_STAGE_CONFIGS: List[StageConfig] = [
@@ -328,16 +339,17 @@ def _llm_evaluate_answer(input: Dict) -> AnswerEvaluation:
     })
 
 
-def _llm_next_question(input: Dict) -> str:
+def _llm_next_question(input: Dict) -> NextQuestion:
     llm = get_llm()
-    chain = INTERVIEW_NEXT_QUESTION_PROMPT | llm
+    structured_llm = llm.with_structured_output(NextQuestion)
+    chain = INTERVIEW_NEXT_QUESTION_PROMPT | structured_llm
     resp = chain.invoke({
         "company_name": input.get("company_name", ""),
         "job_title": input.get("job_title", ""),
         "history": input.get("history", ""),
         "remaining_questions": input.get("remaining_questions", ""),
     })
-    return (resp.content if hasattr(resp, "content") else str(resp)).strip()
+    return resp
 
 
 def _llm_summarize_stage(input: Dict) -> StageSummary:
@@ -800,30 +812,39 @@ def next_question_node(state: Dict[str, Any]) -> Dict[str, Any]:
     )
 
     question_text = ""
+    matched_title = ""
     try:
-        question_text = _llm_next_question({
+        next_q = _llm_next_question({
             "company_name": result.company_name,
             "job_title": result.job_title,
             "history": history,
             "remaining_questions": remaining_text,
         })
+        question_text = (next_q.question or "").strip()
+        matched_title = (next_q.question_title or "").strip()
     except Exception:
         if remaining:
             question_text = remaining[0].question
         else:
             return _finish(state, result)
 
-    # 匹配题库
+    # 匹配题库:优先按 LLM 声明的 title 精确匹配,失败再退化为原文子串匹配
     matched: Optional[Question] = None
-    for q in remaining:
-        if q.question in question_text or question_text in q.question:
-            matched = q
-            break
+    if matched_title:
+        matched = next((q for q in remaining if q.title == matched_title), None)
+    if matched is None:
+        for q in remaining:
+            if q.question in question_text or question_text in q.question:
+                matched = q
+                break
     if matched is None and remaining:
         matched = remaining[0]
     if matched is None:
         matched = Question(title="追问", question=question_text, focus="综合能力", reference_answer="")
     else:
+        # 兜底:LLM 未给出问题文本时,用题库原文,避免空问题
+        if not question_text:
+            question_text = matched.question
         matched = matched.model_copy(update={"question": question_text})
 
     used_titles.append(matched.title)

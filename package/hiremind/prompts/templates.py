@@ -39,7 +39,18 @@ RESUME_PARSER_PROMPT = ChatPromptTemplate.from_messages(
             "system",
             "你是一名资深简历分析师，擅长从候选人简历中提取面试素材。"
             "请重点挖掘：教育背景、工作年限、职业轨迹、核心技术栈、亮点项目、量化成果、"
-            "以及与目标岗位 JD 的潜在 Gap。对简历中的数字（QPS、DAU、优化百分比等）要特别敏感。",
+            "以及与目标岗位 JD 的潜在 Gap。对简历中的数字（QPS、DAU、优化百分比等）要特别敏感。\n\n"
+            "输出要求（必须严格遵守）：\n"
+            "1. 以下字段必须全部输出，一个都不能省略：\n"
+            "   - education：教育背景，如学校、专业、学历；\n"
+            "   - total_years：工作年限，如「3年经验」；\n"
+            "   - career_path：职业轨迹，每段经历一行，格式「公司 - 岗位(起止时间)」，至少 1 条；\n"
+            "   - core_tech_stack：核心技术栈，提取 3-8 项具体技术（如 Python、FastAPI、LangGraph）；\n"
+            "   - highlight_projects：亮点项目，每个含项目名、角色、技术栈、成果，2-5 个；\n"
+            "   - quantified_achievements：量化成果，提取所有含数字的成果（QPS、DAU、优化百分比、规模等），尽量多；\n"
+            "   - potential_gaps：与目标岗位 JD 的潜在 Gap，1-4 条。\n"
+            "2. 列表字段即使没有内容，也必须输出空数组 []，绝不允许省略字段；\n"
+            "3. 提取要尽量完整，宁可多列不可漏列，这些是面试官出题的素材。",
         ),
         (
             "human",
@@ -250,9 +261,13 @@ INTERVIEW_NEXT_QUESTION_PROMPT = ChatPromptTemplate.from_messages(
             "决策原则：\n"
             "- 若候选人某方向答得不好，可继续追问该方向；\n"
             "- 若答得好，推进到下一个方向；\n"
-            "- 题库题目可适当改写以更口语化；\n"
+            "- 题库题目可适当改写以更口语化，但必须保留原题的考察意图；\n"
             "- 不要重复已问过的题。\n\n"
-            "直接给出下一道题的问题文本，不要解释为什么选这道题。",
+            "输出 JSON 对象（不要输出任何其他内容）：\n"
+            "{{\n"
+            '  "question_title": "若从题库选题，填所选题目的 title 原文；若为临时追问，填空字符串",\n'
+            '  "question": "下一道题的完整问题文本（可从题库题口语化改写）"\n'
+            "}}",
         ),
         (
             "human",
@@ -260,7 +275,7 @@ INTERVIEW_NEXT_QUESTION_PROMPT = ChatPromptTemplate.from_messages(
             "目标岗位：{job_title}\n\n"
             "已问过的题目与候选人回答摘要：\n{history}\n\n"
             "剩余题库：\n{remaining_questions}\n\n"
-            "请给出下一道面试题。",
+            "请输出下一道面试题。",
         ),
     ]
 )
