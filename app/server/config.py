@@ -71,6 +71,11 @@ class Settings(BaseModel):
     cors_origins: list[str] = [
         "http://localhost:3000",
         "http://127.0.0.1:3000",
+        # Vite 开发服务器（app/frontend）
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:5174",
+        "http://127.0.0.1:5174",
     ]
 
     def persist(self) -> None:
