@@ -11,7 +11,6 @@ const nextConfig = {
     ];
   },
   // LLM 分析/解析较慢(可达 5 分钟),放宽代理超时与响应体限制
-  proxyTimeout: 10 * 60 * 1000,   // 10 分钟
   experimental: {
     proxyTimeout: 10 * 60 * 1000, // 旧版本字段,双重保险
   },

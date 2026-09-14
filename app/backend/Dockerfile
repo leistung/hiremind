@@ -1,5 +1,5 @@
-# Reuse the existing document/AI engine dependencies during the v2 migration.
-FROM hiremind-backend:latest
+# Reuse the v1 server's document/AI engine dependencies.
+FROM server_image
 WORKDIR /service
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt

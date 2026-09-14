@@ -4,7 +4,9 @@ COPY package.json package-lock.json ./
 RUN npm ci
 COPY . .
 ARG NEXT_PUBLIC_API_BASE=http://localhost:8000/api
+ARG BACKEND_URL=http://server:8000
 ENV NEXT_PUBLIC_API_BASE=$NEXT_PUBLIC_API_BASE
+ENV BACKEND_URL=$BACKEND_URL
 RUN npm run build
 
 FROM node:20-slim AS runner

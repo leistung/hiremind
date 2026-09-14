@@ -231,8 +231,9 @@ npm run dev
 docker compose up -d --build
 ```
 
-- 后端:`hiremind-backend:latest`,端口 8000,挂载 `.hiremind/` 持久化数据 + 源码 bind mount 热更新
-- 前端:`hiremind-frontend:latest`,端口 3000,构建时内联 `NEXT_PUBLIC_API_BASE`
+- 第一版：`studio`（3000）连接 `server`（8000），继续使用 `.hiremind/` 本地工作区。
+- 第二版：`frontend`（3001）连接 `backend`（8001），使用 MySQL 与 Redis 持久化。
+- 四个应用服务和数据库依赖会随 `docker compose up -d --build` 一起启动。
 
 ### 配置模型
 

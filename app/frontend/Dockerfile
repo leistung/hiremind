@@ -11,9 +11,7 @@ RUN npm run build
 
 FROM node:20-slim AS runner
 WORKDIR /app
-COPY --from=builder /app/package.json ./
-COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/dist ./dist
+COPY --from=builder /app ./
 
-EXPOSE 3000
-CMD ["npm", "run", "preview", "--", "--host", "0.0.0.0", "--port", "3000"]
+EXPOSE 3001
+CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "3001"]

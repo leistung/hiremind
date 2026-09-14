@@ -7,15 +7,13 @@
 在项目根目录执行：
 
 ```sh
-# 首次在全新机器运行时，先构建复用的 AI 引擎依赖镜像
-docker compose --profile legacy build backend
-docker compose up -d --build mysql redis community frontend
+docker compose up -d --build
 ```
 
-- 前端：`http://localhost:3000`；本机 Vite 开发页面也可继续使用。
-- 新后端：`http://127.0.0.1:8000/docs`，8001 为兼容端口。
+- 第二版前端：`http://localhost:3001`；本机 Vite 开发页面也可继续使用。
+- 第二版后端：`http://127.0.0.1:8001/docs`。
 - 健康检查：`/health`，实际检查 MySQL 和 Redis。
-- 原 `app/server` 服务放在 `legacy` profile 中，默认不启动且不对外暴露端口。
+- 第一版 `studio` 与 `server` 默认同时启动于 3000、8000，和第二版彼此隔离。
 - MySQL、Redis 仅在 Docker 内部网络可访问，数据分别持久化到 named volumes。
 - 签名密钥未配置时自动生成，持久化于独立服务卷。通过 `HIREMIND_JWT_SECRET` 可显式配置。
 
@@ -50,7 +48,7 @@ docker compose up -d --build mysql redis community frontend
 ## 验证
 
 ```sh
-docker compose exec -T community python tests/integration.py
+docker compose exec -T backend python tests/integration.py
 ```
 
 验证内容包括 root 登录、原始文件和 MySQL 逐字节一致、工作台读取、注册、跨账号访问拒绝、数据持久化、revision 冲突和退出失效。测试不调用 LLM，只清理自己创建的临时账号和数据。文件完全一致检查适用于迁移验收阶段；root 后续正常编辑了工作台数据后，原文件与数据库出现差异是预期行为。
