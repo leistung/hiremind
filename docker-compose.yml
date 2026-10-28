@@ -124,6 +124,9 @@ services:
   mysql:
     image: mysql:8.4
     container_name: hiremind-mysql
+    # 暴露给宿主机(本机 3306 被本地 mysqld 占用,故映射到 3307)
+    ports:
+      - "127.0.0.1:3307:3306"
     environment:
       MYSQL_DATABASE: hiremind
       MYSQL_USER: hiremind
@@ -141,6 +144,9 @@ services:
   redis:
     image: redis:7-alpine
     container_name: hiremind-redis
+    # 暴露给宿主机,供 Navicat 等可视化工具连接
+    ports:
+      - "127.0.0.1:6379:6379"
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - hiremind_redis:/data

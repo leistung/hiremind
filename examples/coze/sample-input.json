@@ -1,0 +1,7 @@
+{
+  "company_name": "示例云科技（虚构）",
+  "job_title": "Python 后端工程师",
+  "company_business_scope": "为企业提供知识库检索与智能客服 SaaS 服务。",
+  "job_requirements": "负责 Python 后端 API、知识库检索和异步任务开发。要求 3 年以上经验，熟悉 FastAPI、PostgreSQL、Redis，具备接口性能优化和线上故障排查能力。熟悉向量检索、RAG、Docker 者优先，重视团队协作与业务结果。",
+  "resume": "以下为虚构测试简历。候选人张同学，计算机本科，3 年 Python 后端经验。2023 年 7 月至 2026 年 8 月在示例软件公司任后端工程师，使用 FastAPI、PostgreSQL、Redis 开发企业工单系统。负责查询接口优化，通过索引调整与缓存将 P95 延迟由 800ms 降至 260ms。参与 Docker 部署及线上告警排查。个人学习项目使用向量数据库搭建文档问答原型，尚无生产 RAG 项目经验。"
+}

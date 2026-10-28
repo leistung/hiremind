@@ -267,6 +267,17 @@ class PreparationTips(BaseModel):
     tips: List[PreparationTip] = Field(default_factory=list)
 
 
+# LLM 结构化输出专用包装(仅暴露 rounds):
+# InterviewQuestions 上还挂着 resume_deep_dive 等 5 个旧版兼容字段,
+# 直接作为工具 schema 会干扰模型(实测 glm-5.2 把旧版结构误塞进 rounds
+# 数组导致校验失败),节点拿到 InterviewRounds 后再包回 InterviewQuestions。
+# 注意:docstring 会原样进入工具 description 被模型读到,只写任务说明。
+class InterviewRounds(BaseModel):
+    """按真实面试节奏组织的面试轮次列表(3-5轮,每轮2-3道题)."""
+
+    rounds: List[InterviewRound] = Field(default_factory=list)
+
+
 # 注:LangGraph 工作流状态(分析流状态 / 面试流状态)已迁移到 models/states.py
 
 

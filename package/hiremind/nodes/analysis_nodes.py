@@ -18,6 +18,7 @@ from __future__ import annotations
 from ..models.schemas import (
     BusinessScenarios,
     InterviewQuestions,
+    InterviewRounds,
     JDProfile,
     MatchAnalysis,
     PreparationTips,
@@ -34,7 +35,7 @@ from ..prompts import (
     RISK_IDENTIFIER_PROMPT,
     SCENARIO_BUILDER_PROMPT,
 )
-from ..services import get_llm
+from ..services import get_structured_llm
 
 
 # ── 节点中文标签(用于 node_io 记录与展示)──
@@ -53,7 +54,7 @@ NODE_LABELS = {
 # ── 节点函数 ──
 #
 # 每个节点统一模式:
-#   1. get_llm() 取模型,with_structured_output 绑定输出模型;
+#   1. get_structured_llm(schema) 取绑定结构化输出的模型;
 #   2. 用对应 Prompt | structured_llm 组成 LCEL chain;
 #   3. invoke 前把 state 中的上游产物转成 JSON 文本(prompt 输入);
 #   4. 成功返回 {"字段名": 结果} 的 patch;失败返回 {"error": ...},
@@ -67,8 +68,7 @@ def parse_jd(state: AnalysisFlowState) -> dict:
     输出:jd_profile(供后续分析节点引用,包括 resume 解析所需的 required_skills)。
     """
     try:
-        llm = get_llm()
-        structured_llm = llm.with_structured_output(JDProfile)
+        structured_llm = get_structured_llm(JDProfile)
         chain = JD_PARSER_PROMPT | structured_llm
         profile = chain.invoke(
             {
@@ -102,8 +102,7 @@ def parse_resume(state: AnalysisFlowState) -> dict:
         if state.jd_profile:
             required_skills = state.jd_profile.required_skills
 
-        llm = get_llm()
-        structured_llm = llm.with_structured_output(ResumeProfile)
+        structured_llm = get_structured_llm(ResumeProfile)
         chain = RESUME_PARSER_PROMPT | structured_llm
         prompt_args = {
             "job_title": state.input.job_title,
@@ -132,8 +131,7 @@ def parse_resume(state: AnalysisFlowState) -> dict:
 def analyze_match(state: AnalysisFlowState) -> dict:
     """对比 JD 与简历,生成 MatchAnalysis."""
     try:
-        llm = get_llm()
-        structured_llm = llm.with_structured_output(MatchAnalysis)
+        structured_llm = get_structured_llm(MatchAnalysis)
         chain = MATCH_ANALYSIS_PROMPT | structured_llm
         analysis = chain.invoke(
             {
@@ -153,8 +151,7 @@ def analyze_match(state: AnalysisFlowState) -> dict:
 def infer_scenarios(state: AnalysisFlowState) -> dict:
     """基于公司业务与 JD 推演业务场景."""
     try:
-        llm = get_llm()
-        structured_llm = llm.with_structured_output(BusinessScenarios)
+        structured_llm = get_structured_llm(BusinessScenarios)
         chain = SCENARIO_BUILDER_PROMPT | structured_llm
         result = chain.invoke(
             {
@@ -174,8 +171,7 @@ def infer_scenarios(state: AnalysisFlowState) -> dict:
 def identify_risks(state: AnalysisFlowState) -> dict:
     """识别履历风险点."""
     try:
-        llm = get_llm()
-        structured_llm = llm.with_structured_output(Risks)
+        structured_llm = get_structured_llm(Risks)
         chain = RISK_IDENTIFIER_PROMPT | structured_llm
         result = chain.invoke(
             {
@@ -199,10 +195,9 @@ def generate_questions(state: AnalysisFlowState) -> dict:
     把所有中间产物以 JSON 文本拼进 prompt,让出题"贴简历、贴 JD"。
     """
     try:
-        llm = get_llm()
-        structured_llm = llm.with_structured_output(InterviewQuestions)
+        structured_llm = get_structured_llm(InterviewRounds)
         chain = QUESTION_GENERATOR_PROMPT | structured_llm
-        questions = chain.invoke(
+        result = chain.invoke(
             {
                 "company_name": state.input.company_name,
                 "job_title": state.input.job_title,
@@ -220,6 +215,9 @@ def generate_questions(state: AnalysisFlowState) -> dict:
                 else "",
             }
         )
+        # LLM 只输出 rounds(避免 InterviewQuestions 上的旧版兼容字段
+        # 混入工具 schema 干扰模型),这里包回完整结构
+        questions = InterviewQuestions(rounds=result.rounds)
         return {"questions": questions}
     except Exception as exc:  # pragma: no cover
         return {"error": f"面试题生成失败: {exc}"}
@@ -228,8 +226,7 @@ def generate_questions(state: AnalysisFlowState) -> dict:
 def generate_preparation_tips(state: AnalysisFlowState) -> dict:
     """生成备考建议."""
     try:
-        llm = get_llm()
-        structured_llm = llm.with_structured_output(PreparationTips)
+        structured_llm = get_structured_llm(PreparationTips)
         chain = PREPARATION_TIPS_PROMPT | structured_llm
         result = chain.invoke(
             {

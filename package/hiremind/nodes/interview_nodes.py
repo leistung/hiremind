@@ -41,7 +41,7 @@ from ..prompts import (
     WRITTEN_BATCH_EVALUATE_PROMPT,
     WRITTEN_EXAM_GENERATOR_PROMPT,
 )
-from ..services import get_llm
+from ..services import get_llm, get_structured_llm
 
 
 # ── 节点中文标签(用于 node_io 记录与展示)──
@@ -255,8 +255,7 @@ def _record_node_io(state: Dict, action: str, payload: Dict, output: Dict, error
 # 节点函数只负责编排与状态更新,LLM 调用细节全部收敛到这里。
 
 def _llm_recommend_stages(input: Dict) -> Dict:
-    llm = get_llm()
-    structured_llm = llm.with_structured_output(StagePlan)
+    structured_llm = get_structured_llm(StagePlan)
     chain = STAGE_PLANNER_PROMPT | structured_llm
     plan = chain.invoke({
         "company_name": input.get("company_name", ""),
@@ -297,8 +296,7 @@ def _llm_start_first(input: Dict) -> str:
 
 
 def _llm_generate_written(input: Dict) -> List[Question]:
-    llm = get_llm()
-    structured_llm = llm.with_structured_output(WrittenExamQuestions)
+    structured_llm = get_structured_llm(WrittenExamQuestions)
     chain = WRITTEN_EXAM_GENERATOR_PROMPT | structured_llm
     result = chain.invoke({
         "question_count": input.get("question_count", 10),
@@ -313,8 +311,7 @@ def _llm_generate_written(input: Dict) -> List[Question]:
 
 
 def _llm_evaluate_written(input: Dict) -> List[AnswerEvaluation]:
-    llm = get_llm()
-    structured_llm = llm.with_structured_output(BatchEvaluation)
+    structured_llm = get_structured_llm(BatchEvaluation)
     chain = WRITTEN_BATCH_EVALUATE_PROMPT | structured_llm
     batch = chain.invoke({
         "company_name": input.get("company_name", ""),
@@ -326,8 +323,7 @@ def _llm_evaluate_written(input: Dict) -> List[AnswerEvaluation]:
 
 
 def _llm_evaluate_answer(input: Dict) -> AnswerEvaluation:
-    llm = get_llm()
-    structured_llm = llm.with_structured_output(AnswerEvaluation)
+    structured_llm = get_structured_llm(AnswerEvaluation)
     chain = INTERVIEW_EVALUATE_PROMPT | structured_llm
     return chain.invoke({
         "company_name": input.get("company_name", ""),
@@ -340,8 +336,7 @@ def _llm_evaluate_answer(input: Dict) -> AnswerEvaluation:
 
 
 def _llm_next_question(input: Dict) -> NextQuestion:
-    llm = get_llm()
-    structured_llm = llm.with_structured_output(NextQuestion)
+    structured_llm = get_structured_llm(NextQuestion)
     chain = INTERVIEW_NEXT_QUESTION_PROMPT | structured_llm
     resp = chain.invoke({
         "company_name": input.get("company_name", ""),
@@ -353,8 +348,7 @@ def _llm_next_question(input: Dict) -> NextQuestion:
 
 
 def _llm_summarize_stage(input: Dict) -> StageSummary:
-    llm = get_llm()
-    structured_llm = llm.with_structured_output(StageSummary)
+    structured_llm = get_structured_llm(StageSummary)
     chain = STAGE_SUMMARY_PROMPT | structured_llm
     return chain.invoke({
         "company_name": input.get("company_name", ""),
@@ -365,8 +359,7 @@ def _llm_summarize_stage(input: Dict) -> StageSummary:
 
 
 def _llm_final_report(input: Dict) -> FinalReport:
-    llm = get_llm()
-    structured_llm = llm.with_structured_output(FinalReport)
+    structured_llm = get_structured_llm(FinalReport)
     chain = INTERVIEW_FINAL_REPORT_PROMPT | structured_llm
     return chain.invoke({
         "company_name": input.get("company_name", ""),

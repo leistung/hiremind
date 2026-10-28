@@ -15,7 +15,7 @@ from ..models.schemas import (
     ResumeData,
 )
 from ..prompts import RESUME_STRUCTURE_PROMPT
-from .llm_service import get_llm
+from .llm_service import get_structured_llm
 
 
 # ── 模板定义 ──
@@ -58,8 +58,7 @@ def parse_resume_text_to_structured(text: str) -> ResumeData:
     if not text or not text.strip():
         return ResumeData()
     try:
-        llm = get_llm()
-        structured_llm = llm.with_structured_output(ResumeData)
+        structured_llm = get_structured_llm(ResumeData)
         chain = RESUME_STRUCTURE_PROMPT | structured_llm
         data = chain.invoke({"resume_text": text[:8000]})
         # 兜底:确保字段类型正确

@@ -145,6 +145,10 @@ QUESTION_GENERATOR_PROMPT = ChatPromptTemplate.from_messages(
             "- rationale：出题分析，说明为什么会出这道题、面试官想验证什么、回答不好会暴露什么问题\n"
             "- reference_answer：基于简历的参考答案，候选人可以如何结合自身经历作答，要具体引用简历内容\n"
             "- follow_ups：2-3 个追问方向\n\n"
+            "篇幅硬性要求（必须严格遵守，超出视为无效输出）：\n"
+            "- 每道题的 question 不超过 150 字，rationale 不超过 80 字，"
+            "reference_answer 不超过 120 字，follow_ups 每条不超过 25 字；\n"
+            "- 全部轮次加起来不超过 15 道题，输出到此为止，不得续写、不得重复。\n\n"
             "题目要贴合 JD 和简历，不能是通用题库。reference_answer 要有简历具体内容，不能是空话。",
         ),
         (
